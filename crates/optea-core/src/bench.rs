@@ -49,6 +49,34 @@ pub struct Run {
     /// the fact, rather than blending into a label and skewing its median.
     #[serde(default = "unknown_focus")]
     pub focused_fraction: f64,
+    /// The capture window used for this run.
+    ///
+    /// Recorded because the window determines *which part of the scene* is
+    /// sampled. Two runs of the same deterministic benchmark with different
+    /// lead-ins measure different content: a stutter near the end of the scene
+    /// falls inside one window and outside the other, which moves the 1% low by
+    /// tens of percent while leaving average FPS almost unchanged. Mixing them
+    /// in one label silently corrupts the comparison.
+    #[serde(default)]
+    pub capture: CaptureParams,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureParams {
+    /// Seconds skipped after the game gained focus.
+    pub delay_s: u64,
+    /// Seconds captured.
+    pub seconds: u64,
+}
+
+impl CaptureParams {
+    pub fn new(delay_s: u64, seconds: u64) -> Self {
+        CaptureParams { delay_s, seconds }
+    }
+
+    pub fn label(&self) -> String {
+        format!("delay {}s, {}s window", self.delay_s, self.seconds)
+    }
 }
 
 /// Runs recorded before focus tracking existed have an unknown value; -1
@@ -120,10 +148,11 @@ impl BenchStore {
         active_tweaks: Vec<String>,
         note: &str,
         focused_fraction: f64,
+        capture: CaptureParams,
     ) -> Result<Run> {
         let summary = stats::summarize(frames)
             .ok_or_else(|| BenchError::Other(anyhow::anyhow!("capture held no usable frames")))?;
-        self.record_summary_with_focus(label, summary, active_tweaks, note, focused_fraction)
+        self.write_run(label, summary, active_tweaks, note, focused_fraction, capture)
     }
 
     pub fn record_summary(
@@ -133,7 +162,14 @@ impl BenchStore {
         active_tweaks: Vec<String>,
         note: &str,
     ) -> Result<Run> {
-        self.record_summary_with_focus(label, summary, active_tweaks, note, 1.0)
+        self.write_run(
+            label,
+            summary,
+            active_tweaks,
+            note,
+            1.0,
+            CaptureParams::default(),
+        )
     }
 
     pub fn record_summary_with_focus(
@@ -143,6 +179,25 @@ impl BenchStore {
         active_tweaks: Vec<String>,
         note: &str,
         focused_fraction: f64,
+    ) -> Result<Run> {
+        self.write_run(
+            label,
+            summary,
+            active_tweaks,
+            note,
+            focused_fraction,
+            CaptureParams::default(),
+        )
+    }
+
+    fn write_run(
+        &self,
+        label: &str,
+        summary: Summary,
+        active_tweaks: Vec<String>,
+        note: &str,
+        focused_fraction: f64,
+        capture: CaptureParams,
     ) -> Result<Run> {
         std::fs::create_dir_all(&self.dir).map_err(|source| BenchError::Io {
             path: self.dir.clone(),
@@ -156,6 +211,7 @@ impl BenchStore {
             active_tweaks,
             note: note.to_string(),
             focused_fraction,
+            capture,
         };
 
         let path = self.dir.join(format!("{}--{}.json", sanitize(label), run.id));
@@ -251,6 +307,22 @@ impl BenchStore {
             .map(|r| format!("{} ({:.0}% focused)", r.id, r.focused_fraction * 100.0))
             .collect();
 
+        // Runs sampled over different windows measure different parts of the
+        // scene and cannot be pooled or compared.
+        let mut windows: Vec<CaptureParams> = baseline
+            .iter()
+            .chain(variant.iter())
+            .map(|r| r.capture)
+            .filter(|c| *c != CaptureParams::default())
+            .collect();
+        windows.sort_by_key(|c| (c.delay_s, c.seconds));
+        windows.dedup();
+        let mixed_windows: Vec<String> = if windows.len() > 1 {
+            windows.iter().map(|c| c.label()).collect()
+        } else {
+            Vec::new()
+        };
+
         Ok(Comparison {
             baseline_label: baseline_label.to_string(),
             variant_label: variant_label.to_string(),
@@ -260,6 +332,7 @@ impl BenchStore {
             effects,
             underpowered: baseline.len() < RECOMMENDED_RUNS || variant.len() < RECOMMENDED_RUNS,
             untrustworthy,
+            mixed_windows,
         })
     }
 }
@@ -278,6 +351,9 @@ pub struct Comparison {
     /// Runs captured while the game did not hold focus, and are therefore
     /// measuring a background throttle rather than gameplay.
     pub untrustworthy: Vec<String>,
+    /// Distinct capture windows present across the two labels. More than one
+    /// means the runs sampled different parts of the scene.
+    pub mixed_windows: Vec<String>,
 }
 
 impl Comparison {
@@ -300,6 +376,14 @@ impl Comparison {
 
     /// One-line conclusion in the project's own terms.
     pub fn conclusion(&self) -> String {
+        if !self.mixed_windows.is_empty() {
+            return format!(
+                "Runs used different capture windows ({}). Each window samples a different part \
+                 of the scene, so these runs measure different content and cannot be compared. \
+                 Re-record them with identical --delay and --seconds.",
+                self.mixed_windows.join(" / ")
+            );
+        }
         if !self.untrustworthy.is_empty() {
             return format!(
                 "{} run(s) were captured while the game was not in focus. Games throttle \
@@ -536,6 +620,78 @@ mod tests {
     }
 
     #[test]
+    fn mixing_capture_windows_invalidates_a_comparison() {
+        // The real failure this guards: two runs of the same deterministic
+        // benchmark with different lead-ins sampled different parts of the
+        // scene. Average FPS barely moved (120.1 vs 122.7) while the 1% low
+        // jumped from ~41 to ~61, because a late-scene stutter fell inside one
+        // window and outside the other.
+        let s = store("windows");
+        for (low, delay) in [(41.0, 20u64), (40.0, 20), (61.0, 10)] {
+            s.write_run(
+                "baseline",
+                summary(low, 120.0),
+                vec![],
+                "",
+                1.0,
+                CaptureParams::new(delay, 70),
+            )
+            .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        for low in [42.0, 41.0] {
+            s.write_run(
+                "variant",
+                summary(low, 120.0),
+                vec![],
+                "",
+                1.0,
+                CaptureParams::new(20, 70),
+            )
+            .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        let cmp = s.compare("baseline", "variant", 0.95, 42).unwrap();
+        assert_eq!(cmp.mixed_windows.len(), 2);
+        assert!(
+            cmp.conclusion().contains("different capture windows"),
+            "must refuse rather than pool incomparable runs: {}",
+            cmp.conclusion()
+        );
+    }
+
+    #[test]
+    fn consistent_capture_windows_are_not_flagged() {
+        let s = store("windows-clean");
+        for low in [41.0, 40.0, 42.0] {
+            s.write_run(
+                "a",
+                summary(low, 120.0),
+                vec![],
+                "",
+                1.0,
+                CaptureParams::new(20, 70),
+            )
+            .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        for low in [43.0, 42.0, 44.0] {
+            s.write_run(
+                "b",
+                summary(low, 120.0),
+                vec![],
+                "",
+                1.0,
+                CaptureParams::new(20, 70),
+            )
+            .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(s.compare("a", "b", 0.95, 42).unwrap().mixed_windows.is_empty());
+    }
+
+    #[test]
     fn fully_focused_runs_are_not_flagged() {
         let s = store("focus-clean");
         record_many(&s, "a", &[60.0, 61.0, 59.0]);
@@ -554,6 +710,7 @@ mod tests {
             active_tweaks: vec![],
             note: String::new(),
             focused_fraction: unknown_focus(),
+            capture: CaptureParams::default(),
         };
         assert!(!run.focus_known());
         assert!(!run.is_trustworthy());

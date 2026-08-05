@@ -219,7 +219,36 @@ pub fn bench_recorded(
         "Game focused",
         &format!("{:.0}%", run.focused_fraction * 100.0),
     );
+    kv(&st, "Capture window", &run.capture.label());
     focus_warning(&st, capture);
+
+    // A label whose runs used different windows is already compromised; say so
+    // now rather than at compare time, while it is still cheap to re-record.
+    let mut windows: Vec<String> = store
+        .runs_for(&run.label)
+        .iter()
+        .map(|r| r.capture.label())
+        .collect();
+    windows.sort();
+    windows.dedup();
+    if windows.len() > 1 {
+        println!();
+        println!(
+            "  {}",
+            st.paint("31", "⚠ THIS LABEL NOW MIXES CAPTURE WINDOWS")
+        );
+        for w in &windows {
+            println!("      {}", st.dim(w));
+        }
+        println!(
+            "  {}",
+            st.paint(
+                "33",
+                "Each window samples a different part of the scene, so these runs are not \
+                 comparable. Re-record them with identical --delay and --seconds."
+            )
+        );
+    }
     println!();
 
     if count < MIN_RUNS {
@@ -293,6 +322,16 @@ pub fn bench_comparison(cmp: &optea_core::bench::Comparison) {
     println!();
     println!("  {}", st.bold(&cmp.conclusion()));
 
+    if !cmp.mixed_windows.is_empty() {
+        println!();
+        println!(
+            "  {}",
+            st.paint("31", "⚠ Runs used different capture windows:")
+        );
+        for w in &cmp.mixed_windows {
+            println!("      {}", st.dim(w));
+        }
+    }
     if !cmp.untrustworthy.is_empty() {
         println!();
         println!(

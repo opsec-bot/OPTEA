@@ -320,6 +320,7 @@ fn cmd_bench(args: &Args) -> Result<()> {
                 active,
                 &args.note,
                 capture.focus.focused_fraction(),
+                optea_core::bench::CaptureParams::new(args.delay, args.seconds),
             )?;
             render::bench_recorded(&run, &store, &capture);
             Ok(())
