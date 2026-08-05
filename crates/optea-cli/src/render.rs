@@ -211,32 +211,63 @@ pub fn quiet_result(results: &[optea_core::quiet::CloseResult]) {
     }
 
     let mut closed = 0;
+    let mut needs_force = false;
     for r in results {
         if r.fully_closed() {
             closed += 1;
             println!("  {} {}", st.paint("32", "✓"), r.label);
-        } else if r.still_running > 0 {
-            println!(
-                "  {} {} {}",
-                st.paint("33", "•"),
-                r.label,
-                st.dim(&format!(
-                    "{} process(es) declined to close — it may be asking you to save",
-                    r.still_running
-                ))
-            );
-        } else if r.protected > 0 {
-            println!(
-                "  {} {} {}",
-                st.dim("-"),
-                r.label,
-                st.dim("protected, refused")
-            );
+            continue;
         }
+
+        let mut notes = Vec::new();
+        if r.closed > 0 {
+            notes.push(format!("{} closed", r.closed));
+        }
+        if r.forced > 0 {
+            notes.push(format!("{} terminated", r.forced));
+        }
+        // Kept distinct: one was asked and refused, the other was never asked.
+        if r.declined > 0 {
+            notes.push(format!("{} declined (may be prompting you to save)", r.declined));
+            needs_force = true;
+        }
+        if r.no_window > 0 {
+            notes.push(format!(
+                "{} background process(es) with no window to ask",
+                r.no_window
+            ));
+            needs_force = true;
+        }
+        if r.protected > 0 {
+            notes.push(format!("{} protected", r.protected));
+        }
+
+        let mark = if r.closed > 0 || r.forced > 0 {
+            st.paint("33", "•")
+        } else {
+            st.paint("31", "✗")
+        };
+        println!("  {} {} {}", mark, r.label, st.dim(&notes.join(", ")));
     }
 
     println!();
-    println!("  {} app(s) closed", closed);
+    println!("  {} app(s) fully closed", closed);
+    if needs_force {
+        println!();
+        println!(
+            "  {}",
+            st.paint(
+                "33",
+                "Some processes have no window and cannot be asked to close. Re-run with \
+                 --force to terminate them.",
+            )
+        );
+        println!(
+            "  {}",
+            st.dim("Force-terminating discards unsaved work — quit those apps from their tray \
+                    icon instead if you prefer.")
+        );
+    }
     println!(
         "  {}",
         st.dim("OPTEA does not reopen these. Start them again yourself when you are done.")

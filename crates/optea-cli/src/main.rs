@@ -49,6 +49,8 @@ OPTIONS:
     --confidence <p>    Confidence level for comparisons. Default 0.95.
     --all               quiet: also close Ask-tier apps without prompting.
     --yes               quiet: answer yes to every prompt. Implies --all.
+    --force             quiet: terminate processes that have no window to ask,
+                        or that declined. Discards unsaved work.
     --wait <n>          Wait up to n seconds for the game to gain focus before
                         capturing. Use this so you can alt-tab into the game
                         and start its benchmark before the capture begins.
@@ -74,6 +76,7 @@ struct Args {
     delay: u64,
     all: bool,
     yes: bool,
+    force: bool,
     positional: Vec<String>,
 }
 
@@ -95,6 +98,7 @@ fn parse_args() -> Result<Args> {
         delay: 0,
         all: false,
         yes: false,
+        force: false,
         positional: Vec::new(),
     };
 
@@ -105,6 +109,7 @@ fn parse_args() -> Result<Args> {
             "--dry-run" => args.dry_run = true,
             "--i-understand" => args.understand = true,
             "--all" => args.all = true,
+            "--force" => args.force = true,
             "--yes" | "-y" => {
                 args.yes = true;
                 args.all = true;
@@ -260,11 +265,11 @@ fn cmd_quiet(args: &Args) -> Result<()> {
 
     render::quiet_plan(&candidates, args.all);
 
-    let mut results = Vec::new();
+    let mut chosen = Vec::new();
     for c in &candidates {
         let go = match c.tier {
-            // Auto-tier still respects an explicit --dry-run above; here it
-            // closes without prompting because there is no user state at risk.
+            // Auto-tier closes without prompting because there is no user
+            // state at risk; --dry-run above already offered a preview.
             Tier::Auto => true,
             Tier::Ask if args.yes => true,
             Tier::Ask if !args.all => false,
@@ -277,13 +282,23 @@ fn cmd_quiet(args: &Args) -> Result<()> {
                 confirm(&format!("  close {}?", c.label))
             }
         };
-
-        if !go {
-            continue;
+        if go {
+            chosen.push(c.clone());
         }
-        results.push(quiet::close(c));
     }
 
+    if args.force {
+        println!();
+        println!("--force: processes that cannot be asked will be terminated, discarding any");
+        println!("unsaved work in them.");
+        if !args.yes && !confirm("proceed?") {
+            println!("cancelled — nothing was closed");
+            return Ok(());
+        }
+    }
+
+    // Parents before helpers, or the parent simply respawns them.
+    let results = quiet::close_all(&chosen, args.force);
     render::quiet_result(&results);
     Ok(())
 }

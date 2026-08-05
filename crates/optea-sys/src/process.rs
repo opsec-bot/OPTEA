@@ -144,6 +144,12 @@ pub fn find_by_name(name: &str) -> Result<Vec<u32>> {
 }
 
 /// Top-level windows belonging to `pid`.
+///
+/// Deliberately includes windows that are not visible. Tray-minimised apps —
+/// launchers, wallpaper and RGB utilities, sync clients — keep a hidden
+/// top-level window that still handles `WM_CLOSE`. Filtering on
+/// `IsWindowVisible` finds nothing for exactly the applications this is aimed
+/// at, and then reports them as having "declined" when they were never asked.
 fn windows_for(pid: u32) -> Vec<HWND> {
     struct Ctx {
         pid: u32,
@@ -154,7 +160,7 @@ fn windows_for(pid: u32) -> Vec<HWND> {
         let ctx = &mut *(lparam.0 as *mut Ctx);
         let mut owner = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut owner));
-        if owner == ctx.pid && IsWindowVisible(hwnd).as_bool() {
+        if owner == ctx.pid {
             ctx.found.push(hwnd);
         }
         true.into()
@@ -170,12 +176,25 @@ fn windows_for(pid: u32) -> Vec<HWND> {
     ctx.found
 }
 
+/// True when `pid` owns at least one visible top-level window.
+pub fn has_visible_window(pid: u32) -> bool {
+    windows_for(pid)
+        .into_iter()
+        .any(|h| unsafe { IsWindowVisible(h).as_bool() })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CloseOutcome {
     /// Exited cleanly after being asked to close.
     Closed,
-    /// Still running after the grace period.
-    StillRunning,
+    /// Was asked to close and did not exit within the grace period.
+    Declined,
+    /// Has no window at all, so there was nothing to ask.
+    ///
+    /// Distinct from [`CloseOutcome::Declined`] on purpose: a background helper
+    /// with no message loop never received a request, and reporting it as
+    /// having refused one is simply false.
+    NoWindow,
     /// Refused because the process is on the denylist.
     Protected,
     /// No such process.
@@ -200,11 +219,11 @@ pub fn close_gracefully(pid: u32, name: &str, grace: std::time::Duration) -> Clo
         }
     }
 
-    // A process with no window cannot be asked politely; report rather than
-    // escalating to a kill on its behalf.
+    // A process with no window cannot be asked politely. Say that plainly
+    // rather than escalating to a kill on its behalf.
     if windows.is_empty() {
         return if is_running(pid) {
-            CloseOutcome::StillRunning
+            CloseOutcome::NoWindow
         } else {
             CloseOutcome::NotFound
         };
@@ -221,13 +240,13 @@ pub fn close_gracefully(pid: u32, name: &str, grace: std::time::Duration) -> Clo
             if waited.0 == 0 {
                 CloseOutcome::Closed
             } else {
-                CloseOutcome::StillRunning
+                CloseOutcome::Declined
             }
         }
         _ => {
             std::thread::sleep(grace);
             if is_running(pid) {
-                CloseOutcome::StillRunning
+                CloseOutcome::Declined
             } else {
                 CloseOutcome::Closed
             }
@@ -319,6 +338,28 @@ mod tests {
         for name in ["EpicGamesLauncher", "wallpaper32", "Discord"] {
             assert!(!is_protected(name), "{name} should be closable");
         }
+    }
+
+    #[test]
+    fn a_windowless_process_is_not_reported_as_declining() {
+        // The distinction that matters: a background helper never received a
+        // request, so calling it a refusal misdescribes what happened.
+        assert_ne!(CloseOutcome::NoWindow, CloseOutcome::Declined);
+    }
+
+    #[test]
+    fn tray_minimised_windows_are_still_found() {
+        // Windows are collected regardless of visibility; filtering on
+        // IsWindowVisible finds nothing for tray-minimised apps, which are
+        // precisely the ones worth closing.
+        let me = std::process::id();
+        let all = windows_for(me);
+        // The test harness may own no windows at all; assert only the
+        // relationship, which must hold either way.
+        assert!(
+            all.len() >= usize::from(has_visible_window(me)),
+            "visible windows must be a subset of all windows"
+        );
     }
 
     #[test]

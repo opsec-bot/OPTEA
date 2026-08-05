@@ -259,13 +259,23 @@ pub struct CloseResult {
     pub label: String,
     pub process: String,
     pub closed: usize,
-    pub still_running: usize,
+    /// Asked to close and did not.
+    pub declined: usize,
+    /// Had no window to ask. Only a force-terminate can end these.
+    pub no_window: usize,
     pub protected: usize,
+    /// Terminated because `force` was set.
+    pub forced: usize,
 }
 
 impl CloseResult {
     pub fn fully_closed(&self) -> bool {
-        self.still_running == 0 && self.protected == 0 && self.closed > 0
+        self.declined == 0 && self.no_window == 0 && self.protected == 0 && self.closed > 0
+    }
+
+    /// True when only a force-terminate could finish the job.
+    pub fn needs_force(&self) -> bool {
+        self.no_window > 0 || self.declined > 0
     }
 }
 
@@ -273,28 +283,60 @@ impl CloseResult {
 pub const GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Ask one candidate's processes to close.
-pub fn close(candidate: &Candidate) -> CloseResult {
+///
+/// With `force`, anything that has no window or declines is terminated. That
+/// discards unsaved work, so it is never the default and never implied.
+pub fn close(candidate: &Candidate, force: bool) -> CloseResult {
     use optea_sys::process::CloseOutcome;
 
-    let mut closed = 0;
-    let mut still_running = 0;
-    let mut protected = 0;
+    let mut r = CloseResult {
+        label: candidate.label.clone(),
+        process: candidate.process.clone(),
+        closed: 0,
+        declined: 0,
+        no_window: 0,
+        protected: 0,
+        forced: 0,
+    };
 
     for pid in &candidate.pids {
         match optea_sys::process::close_gracefully(*pid, &candidate.process, GRACE) {
-            CloseOutcome::Closed | CloseOutcome::NotFound => closed += 1,
-            CloseOutcome::StillRunning => still_running += 1,
-            CloseOutcome::Protected => protected += 1,
+            CloseOutcome::Closed | CloseOutcome::NotFound => r.closed += 1,
+            CloseOutcome::Protected => r.protected += 1,
+            outcome @ (CloseOutcome::Declined | CloseOutcome::NoWindow) => {
+                if force && optea_sys::process::terminate(*pid, &candidate.process).is_ok() {
+                    r.forced += 1;
+                } else if outcome == CloseOutcome::Declined {
+                    r.declined += 1;
+                } else {
+                    r.no_window += 1;
+                }
+            }
         }
     }
+    r
+}
 
-    CloseResult {
-        label: candidate.label.clone(),
-        process: candidate.process.clone(),
-        closed,
-        still_running,
-        protected,
-    }
+/// Close a set of candidates, parents before their helpers.
+///
+/// Ordering matters: helper processes (`EpicWebHelper`, `com.docker.backend`,
+/// `steamwebhelper`) exit on their own once their parent does. Closing them
+/// first achieves nothing, since the parent immediately respawns them.
+pub fn close_all(candidates: &[Candidate], force: bool) -> Vec<CloseResult> {
+    let mut ordered: Vec<&Candidate> = candidates.iter().collect();
+    ordered.sort_by_key(|c| if is_helper(&c.process) { 1 } else { 0 });
+    ordered.into_iter().map(|c| close(c, force)).collect()
+}
+
+/// Processes that are owned by another application and exit with it.
+fn is_helper(process: &str) -> bool {
+    const HELPERS: &[&str] = &[
+        "EpicWebHelper",
+        "com.docker.backend",
+        "steamwebhelper",
+        "LogiOverlay",
+    ];
+    HELPERS.iter().any(|h| h.eq_ignore_ascii_case(process))
 }
 
 #[cfg(test)]
@@ -384,6 +426,31 @@ mod tests {
         if let (Some(fa), Some(la)) = (first_ask, last_auto) {
             assert!(la < fa, "Auto entries must sort before Ask entries");
         }
+    }
+
+    #[test]
+    fn helpers_are_closed_after_their_parents() {
+        // Closing a helper first is wasted work: the parent respawns it.
+        assert!(is_helper("EpicWebHelper"));
+        assert!(is_helper("com.docker.backend"));
+        assert!(is_helper("steamwebhelper"));
+        assert!(!is_helper("EpicGamesLauncher"));
+        assert!(!is_helper("Discord"));
+    }
+
+    #[test]
+    fn a_result_needing_force_is_not_reported_as_closed() {
+        let r = CloseResult {
+            label: "x".into(),
+            process: "x".into(),
+            closed: 0,
+            declined: 0,
+            no_window: 3,
+            protected: 0,
+            forced: 0,
+        };
+        assert!(!r.fully_closed());
+        assert!(r.needs_force());
     }
 
     #[test]
