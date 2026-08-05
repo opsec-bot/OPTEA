@@ -154,6 +154,105 @@ fn kv(st: &Style, key: &str, value: &str) {
     println!("  {:<22} {}", st.dim(key), value);
 }
 
+pub fn optimize_plan(plan: &optea_core::optimize::Plan) {
+    let st = Style::detect();
+
+    println!();
+    println!("{}", st.bold("OPTIMISATION PLAN"));
+
+    if plan.is_empty() {
+        println!("  {}", st.paint("32", "nothing to change — already applied"));
+        println!();
+        return;
+    }
+
+    for (area, title) in [
+        ("game", "GAME SETTINGS"),
+        ("system", "SYSTEM"),
+        ("background", "BACKGROUND APPS"),
+    ] {
+        let changes = plan.by_area(area);
+        if changes.is_empty() {
+            continue;
+        }
+        println!();
+        println!("  {}", st.bold(title));
+        for c in changes {
+            let restart = if c.needs_restart {
+                st.paint("33", "  (needs game restart)")
+            } else {
+                String::new()
+            };
+            println!(
+                "    {}  {} {} {}{}",
+                st.paint("36", "→"),
+                st.bold(&c.what),
+                st.dim(&format!("{} →", c.from)),
+                c.to,
+                restart
+            );
+            println!("        {}", st.dim(c.because));
+        }
+    }
+
+    if !plan.blockers.is_empty() {
+        println!();
+        println!("  {}", st.paint("33", "BLOCKERS"));
+        for b in &plan.blockers {
+            println!("    {}", b);
+        }
+    }
+
+    println!();
+    println!(
+        "  {}",
+        st.dim(&format!(
+            "{} change(s). Settings are backed up first; system tweaks are snapshotted.",
+            plan.changes.len()
+        ))
+    );
+    println!();
+}
+
+pub fn optimize_result(applied: &[String], needs_restart: bool) {
+    let st = Style::detect();
+    println!();
+    println!("{}", st.bold("APPLIED"));
+    if applied.is_empty() {
+        println!("  {}", st.dim("nothing changed"));
+        println!();
+        return;
+    }
+    for a in applied {
+        println!("  {} {}", st.paint("32", "✓"), a);
+    }
+
+    println!();
+    println!("  {} change(s) applied", applied.len());
+    if needs_restart {
+        println!(
+            "  {}",
+            st.paint(
+                "33",
+                "Relaunch Siege — presentation mode only takes effect on start, and a \
+                 benchmark run before relaunching would measure the old setting."
+            )
+        );
+    }
+    println!();
+    println!("{}", st.bold("UNDO"));
+    println!("  {}", st.dim("game settings : optea siege restore pristine"));
+    println!("  {}", st.dim("system tweaks : optea revert"));
+    println!("  {}", st.dim("background apps: reopen them yourself"));
+    println!();
+    println!(
+        "  {}",
+        st.dim("No gain is claimed. Run 5 benchmarks and `optea bench compare` to find out \
+                whether any of this actually helped.")
+    );
+    println!();
+}
+
 pub fn quiet_plan(candidates: &[optea_core::quiet::Candidate], include_ask: bool) {
     use optea_core::quiet::Tier;
     let st = Style::detect();

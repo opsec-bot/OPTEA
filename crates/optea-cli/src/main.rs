@@ -12,6 +12,9 @@ USAGE:
     optea <COMMAND> [OPTIONS]
 
 COMMANDS:
+    optimize            Apply everything the evidence supports, in one step.
+                        Game settings, safe system tweaks, background apps.
+                        Fully reversible. --dry-run to preview.
     doctor              Read-only system report. Changes nothing.
     measure check       Verify the PresentMon service and frame query work.
     measure capture     Capture frames from a running game and summarise them.
@@ -210,6 +213,7 @@ fn main() -> Result<()> {
         "siege" => cmd_siege(&args)?,
         "bench" => cmd_bench(&args)?,
         "quiet" => cmd_quiet(&args)?,
+        "optimize" => cmd_optimize(&args)?,
         "list" => cmd_list(&args)?,
         "apply" => cmd_apply(&args)?,
         "revert" => cmd_revert(&args)?,
@@ -233,6 +237,103 @@ fn cmd_measure(args: &Args) -> Result<()> {
         Some("capture") => cmd_capture(args),
         Some(other) => bail!("unknown measure subcommand '{other}' (try: check | capture)"),
     }
+}
+
+fn cmd_optimize(args: &Args) -> Result<()> {
+    let sys = SystemInfo::query()?;
+    let plan = optea_core::optimize::plan(&sys);
+
+    render::optimize_plan(&plan);
+
+    if args.dry_run {
+        println!("  (dry run — nothing was changed)\n");
+        return Ok(());
+    }
+    if plan.is_empty() {
+        return Ok(());
+    }
+
+    // A running game silently discards settings edits on exit, so refuse
+    // rather than appear to succeed.
+    if let Some(pid) = optea_game::running_game_pid() {
+        bail!(
+            "Siege is running (pid {pid}). Close it first — it rewrites GameSettings.ini on \
+             exit and would discard these changes."
+        );
+    }
+
+    let mut applied = Vec::new();
+
+    // ---- Game settings: every write goes through the verified-backup path.
+    let game_changes = plan.by_area("game");
+    if !game_changes.is_empty() {
+        let (_, file) = siege_file()?;
+        for change in &game_changes {
+            let Some(step) = optea_core::optimize::SETTING_PLAN
+                .iter()
+                .find(|s| {
+                    optea_game::settings::find_editable(s.alias)
+                        .is_some_and(|e| e.key == change.what)
+                })
+            else {
+                continue;
+            };
+            let setting = optea_game::settings::find_editable(step.alias).unwrap();
+            let value = step.target.to_string();
+
+            let report = file.edit(|text| {
+                let mut doc = optea_game::ini::IniDocument::parse(text);
+                if !doc.set(setting.section, setting.key, &value) {
+                    return Err(format!("{} not present", setting.key));
+                }
+                Ok(doc.to_string())
+            })?;
+            if report.changed {
+                applied.push(format!("game: {} {} → {}", change.what, change.from, change.to));
+            }
+        }
+    }
+
+    // ---- System tweaks: skipped rather than failed when unelevated.
+    let system_changes = plan.by_area("system");
+    if !system_changes.is_empty() {
+        if optea_sys::sysinfo::is_elevated()? {
+            let catalog = optea_core::catalog::by_max_risk(&sys, Risk::Safe);
+            let refs: Vec<&dyn Tweak> = catalog.iter().map(|b| b.as_ref()).collect();
+            let engine = optea_core::Engine::with_default_dir(sys.clone())?;
+            let result = engine.apply("optimize", &refs)?;
+            for (id, outcome) in &result.outcomes {
+                if matches!(outcome, optea_core::Outcome::Applied) {
+                    applied.push(format!("system: {id}"));
+                }
+            }
+            println!(
+                "  system snapshot {} — undo with: optea revert {}",
+                result.transaction_id, result.transaction_id
+            );
+        } else {
+            println!(
+                "  {} system tweaks skipped — re-run from an elevated terminal to include them",
+                system_changes.len()
+            );
+        }
+    }
+
+    // ---- Background apps: Auto tier only, never prompting here.
+    let auto: Vec<optea_core::quiet::Candidate> = optea_core::quiet::candidates()
+        .into_iter()
+        .filter(|c| c.tier == optea_core::quiet::Tier::Auto)
+        .collect();
+    if !auto.is_empty() {
+        for r in optea_core::quiet::close_all(&auto, args.force) {
+            if r.closed > 0 || r.forced > 0 {
+                applied.push(format!("background: closed {}", r.label));
+            }
+        }
+    }
+
+    render::optimize_result(&applied, plan.needs_restart());
+    Ok(())
 }
 
 /// Ask a yes/no question on stdin. Defaults to **no** on anything unexpected,
