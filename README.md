@@ -20,7 +20,7 @@ working correctly, not failing.
 | 3 — tweak catalog | initial set |
 | 4 — Siege `GameSettings.ini` | read + analyse done; writes pending |
 | 5 — A/B benchmark automation | done |
-| 6 — GUI | not started |
+| 6 — GUI | done (egui) |
 | 7 — live process tuning | not started |
 
 ## Commands
@@ -115,3 +115,4 @@ not, and the ordinals here held only because those were appended past them.
 Capture is passive: PresentMon consumes ETW traces the OS already emits, so
 tracking a process is a PID filter on that stream — no handle into the game, no
 memory access. This is what keeps measurement inside the anti-cheat boundary.
+

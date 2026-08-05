@@ -1,0 +1,18 @@
+[package]
+name = "optea-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "optea-gui"
+path = "src/main.rs"
+
+[dependencies]
+optea-sys.workspace = true
+optea-core.workspace = true
+optea-game.workspace = true
+optea-metrics.workspace = true
+anyhow.workspace = true
+eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }

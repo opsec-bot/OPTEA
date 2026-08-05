@@ -6,6 +6,7 @@ members = [
     "crates/optea-metrics",
     "crates/optea-game",
     "crates/optea-cli",
+    "crates/optea-gui",
 ]
 
 [workspace.package]
@@ -55,3 +56,4 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
