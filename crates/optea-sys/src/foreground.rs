@@ -89,6 +89,37 @@ impl FocusMonitor {
     }
 }
 
+/// Block until `pid` holds the foreground window, or `timeout` elapses.
+///
+/// Exists because a capture is started from a terminal, which by definition has
+/// focus at that moment. Without this, every run would begin with the game in
+/// the background and the operator racing to alt-tab.
+///
+/// `on_tick` is called about once a second with the seconds remaining, so a
+/// caller can show a countdown.
+pub fn wait_for_focus(
+    pid: u32,
+    timeout: std::time::Duration,
+    mut on_tick: impl FnMut(u64),
+) -> bool {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + timeout;
+    let mut last_tick = u64::MAX;
+
+    while Instant::now() < deadline {
+        if is_foreground(pid) {
+            return true;
+        }
+        let left = (deadline - Instant::now()).as_secs();
+        if left != last_tick {
+            on_tick(left);
+            last_tick = left;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    is_foreground(pid)
+}
+
 /// Confirm a process is in the foreground, as a hard precondition.
 pub fn require_foreground(pid: u32) -> Result<()> {
     match foreground_pid() {
@@ -141,6 +172,22 @@ mod tests {
             m.describe().contains("throttle"),
             "an unfocused capture must explain why the numbers are wrong: {}",
             m.describe()
+        );
+    }
+
+    #[test]
+    fn wait_for_focus_gives_up_after_the_timeout() {
+        // PID 0 can never hold focus, so this must time out rather than hang.
+        let start = std::time::Instant::now();
+        let got = wait_for_focus(0, std::time::Duration::from_millis(400), |_| {});
+        assert!(!got);
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(350),
+            "returned too early to have waited"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "overshot the timeout badly"
         );
     }
 

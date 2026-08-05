@@ -43,6 +43,11 @@ OPTIONS:
     --label <name>      Label to record a benchmark run under.
     --note <text>       Note stored with a run (map, scene, settings).
     --confidence <p>    Confidence level for comparisons. Default 0.95.
+    --wait <n>          Wait up to n seconds for the game to gain focus before
+                        capturing. Use this so you can alt-tab into the game
+                        and start its benchmark before the capture begins.
+    --delay <n>         After focus is gained, skip n seconds before capturing.
+                        Lets you start the benchmark so menu frames are excluded.
 
 Applying or reverting requires an elevated (administrator) terminal.
 ";
@@ -59,6 +64,8 @@ struct Args {
     label: Option<String>,
     note: String,
     confidence: f64,
+    wait: u64,
+    delay: u64,
     positional: Vec<String>,
 }
 
@@ -76,6 +83,8 @@ fn parse_args() -> Result<Args> {
         label: None,
         note: String::new(),
         confidence: 0.95,
+        wait: 0,
+        delay: 0,
         positional: Vec::new(),
     };
 
@@ -110,6 +119,18 @@ fn parse_args() -> Result<Args> {
             "--label" => {
                 i += 1;
                 args.label = raw.get(i).cloned();
+            }
+            "--wait" => {
+                i += 1;
+                let v = raw.get(i).map(String::as_str).unwrap_or("");
+                args.wait = v.parse().map_err(|_| anyhow::anyhow!("bad --wait '{v}'"))?;
+            }
+            "--delay" => {
+                i += 1;
+                let v = raw.get(i).map(String::as_str).unwrap_or("");
+                args.delay = v
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("bad --delay '{v}'"))?;
             }
             "--note" => {
                 i += 1;
@@ -193,12 +214,76 @@ fn cmd_measure(args: &Args) -> Result<()> {
     }
 }
 
+/// Resolve the target pid, optionally waiting for it to come to the foreground,
+/// then capture.
+fn capture_with_focus(
+    args: &Args,
+    pid: u32,
+) -> Result<optea_metrics::presentmon::Capture> {
+    use std::time::Duration;
+
+    if args.wait > 0 {
+        println!(
+            "waiting up to {}s for pid {pid} to come to the foreground — \
+             alt-tab into the game now",
+            args.wait
+        );
+        let focused = optea_sys::foreground::wait_for_focus(
+            pid,
+            Duration::from_secs(args.wait),
+            |left| {
+                if left % 5 == 0 && left > 0 {
+                    println!("  {left}s...");
+                }
+            },
+        );
+        if !focused {
+            bail!(
+                "the game never came to the foreground within {}s — nothing was captured, \
+                 since a background capture would only measure the engine's idle throttle",
+                args.wait
+            );
+        }
+        println!("game has focus");
+    } else {
+        println!("capturing pid {pid} for {}s...", args.seconds);
+    }
+
+    if args.delay > 0 {
+        // Excludes menu navigation and the benchmark's own warm-up, which are
+        // not the workload being measured.
+        println!("  skipping {}s before capture starts...", args.delay);
+        for left in (1..=args.delay).rev() {
+            if left % 5 == 0 || left <= 3 {
+                println!("    {left}s...");
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        // Losing focus during the lead-in means the run is already invalid.
+        if !optea_sys::foreground::is_foreground(pid) {
+            bail!("the game lost focus during the lead-in — nothing was captured");
+        }
+    }
+
+    if args.wait > 0 || args.delay > 0 {
+        println!("capturing for {}s", args.seconds);
+    }
+
+    let mut session = optea_metrics::presentmon::Session::open()?;
+    session.track(pid)?;
+    Ok(session.capture(
+        pid,
+        Duration::from_secs(args.seconds),
+        Duration::from_millis(200),
+    )?)
+}
+
 /// Fixed so a verdict is reproducible across invocations. Change it only to
 /// check deliberately that a result is not an artefact of one resampling.
 const BOOTSTRAP_SEED: u64 = 0x0071_EA00;
 
 fn cmd_bench(args: &Args) -> Result<()> {
-    use std::time::Duration;
+    
     let store = optea_core::bench::BenchStore::with_default_dir()?;
 
     match args.positional.first().map(String::as_str) {
@@ -217,14 +302,7 @@ fn cmd_bench(args: &Args) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("no known game running — pass --pid <n>"))?,
             };
 
-            println!("capturing pid {pid} for {}s...", args.seconds);
-            let mut session = optea_metrics::presentmon::Session::open()?;
-            session.track(pid)?;
-            let capture = session.capture(
-                pid,
-                Duration::from_secs(args.seconds),
-                Duration::from_millis(200),
-            )?;
+            let capture = capture_with_focus(args, pid)?;
 
             // Record which tweaks are active, so a run's provenance is stored
             // with it rather than relying on memory.
@@ -428,7 +506,7 @@ fn cmd_siege(args: &Args) -> Result<()> {
 const KNOWN_GAMES: &[&str] = &["RainbowSix", "RainbowSixGame"];
 
 fn cmd_capture(args: &Args) -> Result<()> {
-    use std::time::Duration;
+    
 
     let pid = match args.pid {
         Some(p) => p,
@@ -441,13 +519,7 @@ fn cmd_capture(args: &Args) -> Result<()> {
         args.seconds
     );
 
-    let mut session = optea_metrics::presentmon::Session::open()?;
-    session.track(pid)?;
-    let capture = session.capture(
-        pid,
-        Duration::from_secs(args.seconds),
-        Duration::from_millis(200),
-    )?;
+    let capture = capture_with_focus(args, pid)?;
 
     let summary = optea_metrics::summarize(&capture.frames).ok_or_else(|| {
         anyhow::anyhow!(
