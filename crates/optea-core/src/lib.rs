@@ -4,6 +4,7 @@ pub mod bench;
 pub mod catalog;
 pub mod doctor;
 pub mod engine;
+pub mod quiet;
 pub mod tweak;
 
 pub use engine::{ApplyResult, Engine, Outcome, Transaction};

@@ -22,6 +22,9 @@ COMMANDS:
     siege benchmark     Read the game's own benchmark report (CPU vs GPU time).
     siege backup        Take a verified backup now. Safe while the game runs.
     siege restore       Restore the settings file from a backup.
+    quiet               Close background apps that steal CPU from the game.
+                        Auto-tier apps close directly; anything holding your
+                        work asks first. Use --dry-run to just see the list.
     bench record        Capture a run and store it under a label.
     bench list          Show recorded labels and run counts.
     bench compare       A/B two labels and report whether the difference is real.
@@ -44,6 +47,8 @@ OPTIONS:
     --label <name>      Label to record a benchmark run under.
     --note <text>       Note stored with a run (map, scene, settings).
     --confidence <p>    Confidence level for comparisons. Default 0.95.
+    --all               quiet: also close Ask-tier apps without prompting.
+    --yes               quiet: answer yes to every prompt. Implies --all.
     --wait <n>          Wait up to n seconds for the game to gain focus before
                         capturing. Use this so you can alt-tab into the game
                         and start its benchmark before the capture begins.
@@ -67,6 +72,8 @@ struct Args {
     confidence: f64,
     wait: u64,
     delay: u64,
+    all: bool,
+    yes: bool,
     positional: Vec<String>,
 }
 
@@ -86,6 +93,8 @@ fn parse_args() -> Result<Args> {
         confidence: 0.95,
         wait: 0,
         delay: 0,
+        all: false,
+        yes: false,
         positional: Vec::new(),
     };
 
@@ -95,6 +104,11 @@ fn parse_args() -> Result<Args> {
             "--json" => args.json = true,
             "--dry-run" => args.dry_run = true,
             "--i-understand" => args.understand = true,
+            "--all" => args.all = true,
+            "--yes" | "-y" => {
+                args.yes = true;
+                args.all = true;
+            }
             "--risk" => {
                 i += 1;
                 let v = raw.get(i).map(String::as_str).unwrap_or("");
@@ -190,6 +204,7 @@ fn main() -> Result<()> {
         "measure" => cmd_measure(&args)?,
         "siege" => cmd_siege(&args)?,
         "bench" => cmd_bench(&args)?,
+        "quiet" => cmd_quiet(&args)?,
         "list" => cmd_list(&args)?,
         "apply" => cmd_apply(&args)?,
         "revert" => cmd_revert(&args)?,
@@ -213,6 +228,64 @@ fn cmd_measure(args: &Args) -> Result<()> {
         Some("capture") => cmd_capture(args),
         Some(other) => bail!("unknown measure subcommand '{other}' (try: check | capture)"),
     }
+}
+
+/// Ask a yes/no question on stdin. Defaults to **no** on anything unexpected,
+/// so a stray keypress or a piped stdin never closes an app by accident.
+fn confirm(prompt: &str) -> bool {
+    use std::io::Write;
+    print!("{prompt} [y/N] ");
+    let _ = std::io::stdout().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+fn cmd_quiet(args: &Args) -> Result<()> {
+    use optea_core::quiet::{self, Tier};
+
+    let candidates = quiet::candidates();
+    if candidates.is_empty() {
+        println!("nothing to close — no known background apps are running");
+        return Ok(());
+    }
+
+    if args.dry_run {
+        render::quiet_plan(&candidates, args.all);
+        return Ok(());
+    }
+
+    render::quiet_plan(&candidates, args.all);
+
+    let mut results = Vec::new();
+    for c in &candidates {
+        let go = match c.tier {
+            // Auto-tier still respects an explicit --dry-run above; here it
+            // closes without prompting because there is no user state at risk.
+            Tier::Auto => true,
+            Tier::Ask if args.yes => true,
+            Tier::Ask if !args.all => false,
+            Tier::Ask => {
+                println!();
+                println!("  {} — {}", c.label, c.why);
+                if let Some(cost) = &c.cost {
+                    println!("  cost: {cost}");
+                }
+                confirm(&format!("  close {}?", c.label))
+            }
+        };
+
+        if !go {
+            continue;
+        }
+        results.push(quiet::close(c));
+    }
+
+    render::quiet_result(&results);
+    Ok(())
 }
 
 /// Resolve the target pid, optionally waiting for it to come to the foreground,

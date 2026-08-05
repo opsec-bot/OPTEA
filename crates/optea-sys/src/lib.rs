@@ -12,6 +12,7 @@ pub mod foreground;
 pub mod gpu;
 pub mod paths;
 pub mod power;
+pub mod process;
 pub mod registry;
 pub mod sysinfo;
 pub mod wide;

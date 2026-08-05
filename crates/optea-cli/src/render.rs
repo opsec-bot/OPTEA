@@ -154,6 +154,96 @@ fn kv(st: &Style, key: &str, value: &str) {
     println!("  {:<22} {}", st.dim(key), value);
 }
 
+pub fn quiet_plan(candidates: &[optea_core::quiet::Candidate], include_ask: bool) {
+    use optea_core::quiet::Tier;
+    let st = Style::detect();
+
+    println!();
+    println!("{}", st.bold("BACKGROUND APPS RUNNING"));
+    println!(
+        "  {}",
+        st.dim("Only apps on OPTEA's allowlist appear here. Anti-cheat, the game, the shell, \
+                and system processes are never candidates.")
+    );
+    println!();
+
+    for c in candidates {
+        let (code, tag) = match c.tier {
+            Tier::Auto => ("32", "CLOSE"),
+            Tier::Ask if include_ask => ("33", " ASK "),
+            Tier::Ask => ("2", " SKIP"),
+        };
+        println!(
+            "  {}  {}{}",
+            st.paint(code, tag),
+            st.bold(&c.label),
+            st.dim(&c.instance_note())
+        );
+        println!("        {}", c.why);
+        if let Some(cost) = &c.cost {
+            println!("        {}", st.dim(&format!("cost: {cost}")));
+        }
+    }
+
+    let asks = candidates.iter().filter(|c| c.tier == Tier::Ask).count();
+    if asks > 0 && !include_ask {
+        println!();
+        println!(
+            "  {}",
+            st.dim(&format!(
+                "{asks} app(s) that hold your work are skipped. Add --all to be asked about \
+                 them, or --yes to close them without prompting."
+            ))
+        );
+    }
+    println!();
+}
+
+pub fn quiet_result(results: &[optea_core::quiet::CloseResult]) {
+    let st = Style::detect();
+
+    println!();
+    println!("{}", st.bold("RESULT"));
+    if results.is_empty() {
+        println!("  {}", st.dim("nothing was closed"));
+        println!();
+        return;
+    }
+
+    let mut closed = 0;
+    for r in results {
+        if r.fully_closed() {
+            closed += 1;
+            println!("  {} {}", st.paint("32", "✓"), r.label);
+        } else if r.still_running > 0 {
+            println!(
+                "  {} {} {}",
+                st.paint("33", "•"),
+                r.label,
+                st.dim(&format!(
+                    "{} process(es) declined to close — it may be asking you to save",
+                    r.still_running
+                ))
+            );
+        } else if r.protected > 0 {
+            println!(
+                "  {} {} {}",
+                st.dim("-"),
+                r.label,
+                st.dim("protected, refused")
+            );
+        }
+    }
+
+    println!();
+    println!("  {} app(s) closed", closed);
+    println!(
+        "  {}",
+        st.dim("OPTEA does not reopen these. Start them again yourself when you are done.")
+    );
+    println!();
+}
+
 pub fn bench_list(store: &optea_core::bench::BenchStore) {
     use optea_core::bench::{MIN_RUNS, RECOMMENDED_RUNS};
     let st = Style::detect();

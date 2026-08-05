@@ -15,6 +15,7 @@ features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_UI_Shell",
     "Win32_Globalization",
+    "Win32_System_Diagnostics_ToolHelp",
 ]
 
 [target.'cfg(windows)'.dependencies]
