@@ -154,6 +154,79 @@ fn kv(st: &Style, key: &str, value: &str) {
     println!("  {:<22} {}", st.dim(key), value);
 }
 
+pub fn siege_status(
+    profile: &optea_game::profile::SiegeProfile,
+    file: &optea_game::GuardedFile,
+) {
+    let st = Style::detect();
+    println!();
+    println!("{}", st.bold("SIEGE SETTINGS"));
+    kv(&st, "Profile", &profile.id);
+    kv(&st, "File", &file.target().display().to_string());
+
+    match std::fs::read(file.target()) {
+        Ok(bytes) => {
+            kv(&st, "Size", &format!("{} bytes", bytes.len()));
+            kv(
+                &st,
+                "SHA-256",
+                &optea_game::backup::sha256_hex(&bytes)[..32].to_string(),
+            );
+            let crlf = bytes.windows(2).filter(|w| w == b"\r\n").count();
+            kv(&st, "Line endings", &format!("{crlf} CRLF"));
+        }
+        Err(e) => kv(&st, "File", &format!("unreadable: {e}")),
+    }
+
+    println!();
+    println!("{}", st.bold("BACKUPS"));
+    kv(&st, "Store", &file.store().dir().display().to_string());
+    match file.store().pristine() {
+        Some(p) => {
+            let ok = p.verify().is_ok();
+            kv(
+                &st,
+                "Pristine",
+                &format!(
+                    "{} ({} bytes) {}",
+                    p.meta.taken_at,
+                    p.meta.size,
+                    if ok {
+                        st.paint("32", "verified")
+                    } else {
+                        st.paint("31", "FAILED VERIFICATION")
+                    }
+                ),
+            );
+        }
+        None => kv(
+            &st,
+            "Pristine",
+            &st.dim("none yet — taken automatically on first edit"),
+        ),
+    }
+    let history = file.store().history();
+    kv(&st, "Rolling backups", &history.len().to_string());
+    for b in history.iter().take(5) {
+        let ok = if b.verify().is_ok() { "ok" } else { "CORRUPT" };
+        println!("    {}  {} bytes  {}", st.dim(&b.meta.id), b.meta.size, ok);
+    }
+
+    println!();
+    println!("{}", st.bold("EDITABLE RIGHT NOW?"));
+    match file.preflight() {
+        Ok(()) => println!("  {} safe to edit", st.paint("32", "yes —")),
+        Err(e) => {
+            println!("  {} {}", st.paint("33", "no —"), e);
+            println!(
+                "  {}",
+                st.dim("taking a backup is still safe; it only reads the file")
+            );
+        }
+    }
+    println!();
+}
+
 pub fn measure_check(d: &optea_metrics::presentmon::Diagnostics) {
     let st = Style::detect();
     let (maj, min, patch) = d.api_version;

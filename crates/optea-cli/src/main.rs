@@ -15,6 +15,9 @@ COMMANDS:
     doctor              Read-only system report. Changes nothing.
     measure check       Verify the PresentMon service and frame query work.
     measure capture     Capture frames from a running game and summarise them.
+    siege status        Show the Siege profile, settings file, and backup state.
+    siege backup        Take a verified backup now. Safe while the game runs.
+    siege restore       Restore the settings file from a backup.
     list                Show the tweak catalog and each entry's current state.
     apply               Apply tweaks. Captures a revertible snapshot first.
     revert [<id>]       Undo a transaction. Defaults to the most recent.
@@ -130,6 +133,7 @@ fn main() -> Result<()> {
             }
         }
         "measure" => cmd_measure(&args)?,
+        "siege" => cmd_siege(&args)?,
         "list" => cmd_list(&args)?,
         "apply" => cmd_apply(&args)?,
         "revert" => cmd_revert(&args)?,
@@ -152,6 +156,66 @@ fn cmd_measure(args: &Args) -> Result<()> {
         }
         Some("capture") => cmd_capture(args),
         Some(other) => bail!("unknown measure subcommand '{other}' (try: check | capture)"),
+    }
+}
+
+/// Resolve the active Siege profile and a guarded handle to its settings file.
+fn siege_file() -> Result<(optea_game::profile::SiegeProfile, optea_game::GuardedFile)> {
+    let profiles = optea_game::profile::discover()?
+        .ok_or_else(|| anyhow::anyhow!("no Siege settings found — launch the game once"))?;
+    let active = profiles
+        .active()
+        .ok_or_else(|| anyhow::anyhow!("Siege settings folder exists but holds no profile"))?
+        .clone();
+    let store = optea_game::BackupStore::for_profile(&active.id)?;
+    let file = optea_game::GuardedFile::new(active.settings_path.clone(), store);
+    Ok((active, file))
+}
+
+fn cmd_siege(args: &Args) -> Result<()> {
+    match args.positional.first().map(String::as_str) {
+        Some("status") | None => {
+            let (profile, file) = siege_file()?;
+            render::siege_status(&profile, &file);
+            Ok(())
+        }
+        Some("backup") => {
+            let (_, file) = siege_file()?;
+            // Deliberately not gated on preflight: taking a backup only reads
+            // the file, so it is safe even mid-match.
+            let backup = file.store().ensure_pristine(file.target())?;
+            backup.verify()?;
+            let rolling = file.store().take(file.target())?;
+            rolling.verify()?;
+            println!("pristine : {}", backup.data_path.display());
+            println!("backup   : {}", rolling.data_path.display());
+            println!("sha256   : {}", rolling.meta.sha256);
+            println!("verified : yes ({} bytes)", rolling.meta.size);
+            Ok(())
+        }
+        Some("restore") => {
+            let (_, file) = siege_file()?;
+            match args.positional.get(1).map(String::as_str) {
+                Some("pristine") | None => {
+                    file.preflight()?;
+                    file.restore_pristine()?;
+                    println!("restored {} from the pristine copy", file.target().display());
+                }
+                Some(id) => {
+                    file.preflight()?;
+                    let backup = file
+                        .store()
+                        .history()
+                        .into_iter()
+                        .find(|b| b.meta.id == id)
+                        .ok_or_else(|| anyhow::anyhow!("no backup with id '{id}'"))?;
+                    file.restore(&backup)?;
+                    println!("restored {} from {id}", file.target().display());
+                }
+            }
+            Ok(())
+        }
+        Some(other) => bail!("unknown siege subcommand '{other}' (status | backup | restore)"),
     }
 }
 
