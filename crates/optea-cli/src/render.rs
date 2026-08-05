@@ -323,6 +323,94 @@ pub fn bench_comparison(cmp: &optea_core::bench::Comparison) {
     println!();
 }
 
+pub fn siege_benchmark(r: &optea_game::benchmark::BenchmarkReport) {
+    let st = Style::detect();
+    println!();
+    println!("{}", st.bold("IN-GAME BENCHMARK"));
+    kv(&st, "Report", &r.stamp);
+    kv(
+        &st,
+        "Frames",
+        &format!("{} over {:.1}s", r.frame_count, r.duration_s),
+    );
+    if let Some(load) = r.loading_time_ms {
+        kv(&st, "Loading time", &format!("{:.1}s", load / 1000.0));
+    }
+    println!();
+    kv(&st, "Average FPS", &format!("{:.1}", r.avg_fps));
+    kv(&st, "Highest FPS", &format!("{:.1}", r.highest_fps));
+    kv(&st, "Lowest FPS", &st.bold(&format!("{:.1}", r.lowest_fps)));
+    kv(
+        &st,
+        "Worst frame",
+        &format!("{:.1} ms", r.largest_frame_time_ms),
+    );
+
+    if r.cpu_times_ms.is_empty() {
+        println!();
+        println!("  {}", st.dim("no CPU/GPU series in the HTML report"));
+        println!();
+        return;
+    }
+
+    println!();
+    println!("{}", st.bold("CPU vs GPU TIME  (the engine's own instrumentation)"));
+    let row = |label: &str, q: f64| {
+        let c = r.cpu_percentile(q).unwrap_or(f64::NAN);
+        let g = r.gpu_percentile(q).unwrap_or(f64::NAN);
+        // Whichever side is longer is the one gating that frame.
+        let marker = if c > g {
+            st.paint("33", "CPU")
+        } else {
+            st.paint("36", "GPU")
+        };
+        println!(
+            "  {:<8} CPU {:>7.2} ms    GPU {:>7.2} ms    {} is the longer pole",
+            label, c, g, marker
+        );
+    };
+    row("median", 0.50);
+    row("p95", 0.95);
+    row("p99", 0.99);
+
+    if let Some(frac) = r.cpu_bound_fraction_after(25) {
+        println!();
+        kv(
+            &st,
+            "CPU > GPU",
+            &format!("{:.0}% of samples (excluding loading)", frac * 100.0),
+        );
+    }
+
+    println!();
+    match r.tail_is_cpu_bound() {
+        Some(true) => {
+            println!(
+                "  {}",
+                st.paint("33", "The slow tail is CPU-bound.")
+            );
+            println!(
+                "  {}",
+                st.dim(
+                    "Lowering GPU-side quality (shadows, reflections, textures, resolution) \
+                     will not move the 1% lows much, because the GPU is not what those frames \
+                     are waiting on. CPU-side work — draw calls, geometry, and background \
+                     processes stealing cores — is where the stutters come from."
+                )
+            );
+        }
+        Some(false) => {
+            println!("  {}", st.paint("36", "The slow tail is GPU-bound."));
+            println!(
+                "  {}",
+                st.dim("Resolution and GPU-side quality settings are the effective levers here.")
+            );
+        }
+        None => {}
+    }
+    println!();
+}
+
 pub fn siege_editable() {
     let st = Style::detect();
     println!();

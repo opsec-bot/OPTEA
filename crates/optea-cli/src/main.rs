@@ -19,6 +19,7 @@ COMMANDS:
     siege settings      Read GameSettings.ini and analyse it for this hardware.
     siege set <k> <v>   Change a setting. Backs up and verifies first.
     siege editable      List the settings OPTEA is willing to write.
+    siege benchmark     Read the game's own benchmark report (CPU vs GPU time).
     siege backup        Take a verified backup now. Safe while the game runs.
     siege restore       Restore the settings file from a backup.
     bench record        Capture a run and store it under a label.
@@ -399,6 +400,16 @@ fn cmd_siege(args: &Args) -> Result<()> {
         }
         Some("editable") => {
             render::siege_editable();
+            Ok(())
+        }
+        Some("benchmark") => {
+            let dir = optea_game::benchmark::report_dir()?;
+            let report = optea_game::benchmark::latest_report(&dir)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                render::siege_benchmark(&report);
+            }
             Ok(())
         }
         Some("set") => {
