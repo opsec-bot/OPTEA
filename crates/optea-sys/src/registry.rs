@@ -13,10 +13,11 @@ use std::ffi::c_void;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
-    RegCreateKeyExW, RegCloseKey, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY,
-    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_WRITE,
-    REG_BINARY, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_QWORD,
-    REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_ANY,
+    RegCreateKeyExW, RegCloseKey, RegDeleteKeyValueW, RegDeleteKeyW, RegGetValueW, RegOpenKeyExW,
+    RegQueryInfoKeyW, RegSetKeyValueW, HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER,
+    HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WRITE, REG_BINARY, REG_DWORD, REG_EXPAND_SZ,
+    REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_QWORD, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND,
+    RRF_RT_ANY,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +302,117 @@ pub fn restore(key: &RegKey, captured: &Option<RegValue>) -> Result<()> {
     }
 }
 
+/// True when the key itself exists, regardless of whether it holds any values.
+pub fn key_exists(root: Root, subkey: &str) -> bool {
+    let w = wide(subkey);
+    let mut hkey = HKEY::default();
+    let status =
+        unsafe { RegOpenKeyExW(root.hkey(), w.as_pcwstr(), 0, KEY_READ, &mut hkey) };
+    if status == ERROR_SUCCESS {
+        unsafe {
+            let _ = RegCloseKey(hkey);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// True when the key exists and holds no values and no subkeys.
+pub fn key_is_empty(root: Root, subkey: &str) -> Result<bool> {
+    let w = wide(subkey);
+    let mut hkey = HKEY::default();
+    let status = unsafe { RegOpenKeyExW(root.hkey(), w.as_pcwstr(), 0, KEY_READ, &mut hkey) };
+    if status != ERROR_SUCCESS {
+        return Ok(false);
+    }
+
+    let mut subkeys: u32 = 0;
+    let mut values: u32 = 0;
+    let status = unsafe {
+        RegQueryInfoKeyW(
+            hkey,
+            windows::core::PWSTR::null(),
+            None,
+            None,
+            Some(&mut subkeys),
+            None,
+            None,
+            Some(&mut values),
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+    unsafe {
+        let _ = RegCloseKey(hkey);
+    }
+
+    if status != ERROR_SUCCESS {
+        return Err(SysError::Registry {
+            op: "RegQueryInfoKeyW",
+            path: format!("{}\\{}", root.as_str(), subkey),
+            source: windows::core::Error::from(status.to_hresult()),
+        });
+    }
+    Ok(subkeys == 0 && values == 0)
+}
+
+/// Delete a key. Fails if it still has subkeys; succeeds if already absent.
+pub fn delete_key(root: Root, subkey: &str) -> Result<()> {
+    let w = wide(subkey);
+    let status = unsafe { RegDeleteKeyW(root.hkey(), w.as_pcwstr()) };
+    if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    Err(SysError::Registry {
+        op: "RegDeleteKeyW",
+        path: format!("{}\\{}", root.as_str(), subkey),
+        source: windows::core::Error::from(status.to_hresult()),
+    })
+}
+
+/// Ancestor paths of `subkey` (including itself) that do not currently exist,
+/// deepest first.
+///
+/// Recorded at capture time so a revert can remove keys the apply created.
+/// Without this, writing a value into a policy path that Windows ships without
+/// leaves an empty key behind forever — the value is gone, but the machine is
+/// not back to how it started.
+pub fn absent_ancestors(root: Root, subkey: &str) -> Vec<String> {
+    let parts: Vec<&str> = subkey.split('\\').filter(|p| !p.is_empty()).collect();
+    let mut absent = Vec::new();
+    for depth in (1..=parts.len()).rev() {
+        let path = parts[..depth].join("\\");
+        if key_exists(root, &path) {
+            break; // everything above this exists too
+        }
+        absent.push(path);
+    }
+    absent
+}
+
+/// Remove keys that were absent before an apply and are empty again now.
+///
+/// Conservative by construction: a key is only removed if it was recorded as
+/// absent at capture time *and* currently holds nothing. Stops at the first key
+/// that is non-empty, since anything below it would then be orphaned.
+pub fn prune_created_keys(root: Root, created: &[String]) -> Result<usize> {
+    let mut removed = 0;
+    for path in created {
+        if !key_exists(root, path) {
+            continue;
+        }
+        if !key_is_empty(root, path)? {
+            break;
+        }
+        delete_key(root, path)?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 fn ensure_key(key: &RegKey) -> Result<()> {
     let subkey = wide(&key.subkey);
     let mut hkey = HKEY::default();
@@ -439,5 +551,100 @@ mod tests {
         let key = scratch("never_existed");
         delete(&key).unwrap();
         delete(&key).unwrap();
+    }
+
+    #[test]
+    fn detects_key_existence() {
+        assert!(key_exists(Root::Hklm, r"SOFTWARE\Microsoft"));
+        assert!(!key_exists(Root::Hklm, r"SOFTWARE\OpteaNoSuchKeyAnywhere"));
+    }
+
+    #[test]
+    fn absent_ancestors_reports_deepest_first() {
+        let base = r"Software\OPTEA\PruneTest\Alpha\Beta";
+        // Nothing under PruneTest exists yet.
+        let _ = delete_key(Root::Hkcu, base);
+        let _ = delete_key(Root::Hkcu, r"Software\OPTEA\PruneTest\Alpha");
+        let _ = delete_key(Root::Hkcu, r"Software\OPTEA\PruneTest");
+
+        let absent = absent_ancestors(Root::Hkcu, base);
+        assert_eq!(
+            absent,
+            vec![
+                r"Software\OPTEA\PruneTest\Alpha\Beta".to_string(),
+                r"Software\OPTEA\PruneTest\Alpha".to_string(),
+                r"Software\OPTEA\PruneTest".to_string(),
+            ],
+            "must list deepest first so pruning walks upward"
+        );
+
+        // An existing path contributes nothing.
+        assert!(absent_ancestors(Root::Hklm, r"SOFTWARE\Microsoft").is_empty());
+    }
+
+    #[test]
+    fn prune_removes_only_keys_it_created() {
+        let key = RegKey::hkcu(r"Software\OPTEA\PruneTest\Alpha\Beta", "Val");
+        let _ = delete_key(Root::Hkcu, r"Software\OPTEA\PruneTest\Alpha\Beta");
+        let _ = delete_key(Root::Hkcu, r"Software\OPTEA\PruneTest\Alpha");
+        let _ = delete_key(Root::Hkcu, r"Software\OPTEA\PruneTest");
+
+        let created = absent_ancestors(Root::Hkcu, &key.subkey);
+        assert_eq!(created.len(), 3);
+
+        write(&key, &RegValue::Dword(1)).unwrap();
+        assert!(key_exists(Root::Hkcu, &key.subkey));
+
+        // Deleting the value leaves the empty key chain behind...
+        delete(&key).unwrap();
+        assert!(key_exists(Root::Hkcu, &key.subkey), "empty key should linger");
+
+        // ...until pruning removes exactly what was created.
+        let removed = prune_created_keys(Root::Hkcu, &created).unwrap();
+        assert_eq!(removed, 3);
+        assert!(!key_exists(Root::Hkcu, r"Software\OPTEA\PruneTest"));
+        // The pre-existing parent is untouched.
+        assert!(key_exists(Root::Hkcu, r"Software\OPTEA"));
+    }
+
+    #[test]
+    fn prune_stops_at_a_key_that_gained_other_values() {
+        let key = RegKey::hkcu(r"Software\OPTEA\PruneStop\Inner", "Mine");
+        let _ = delete_key(Root::Hkcu, r"Software\OPTEA\PruneStop\Inner");
+        let _ = delete_key(Root::Hkcu, r"Software\OPTEA\PruneStop");
+
+        let created = absent_ancestors(Root::Hkcu, &key.subkey);
+        write(&key, &RegValue::Dword(1)).unwrap();
+
+        // Something else put a value in the parent while we held the key.
+        let other = RegKey::hkcu(r"Software\OPTEA\PruneStop", "SomeoneElse");
+        write(&other, &RegValue::Dword(9)).unwrap();
+
+        delete(&key).unwrap();
+        let removed = prune_created_keys(Root::Hkcu, &created).unwrap();
+
+        assert_eq!(removed, 1, "only the empty inner key should go");
+        assert!(
+            key_exists(Root::Hkcu, r"Software\OPTEA\PruneStop"),
+            "must not delete a key holding someone else's value"
+        );
+        assert_eq!(read(&other).unwrap(), Some(RegValue::Dword(9)));
+
+        delete(&other).unwrap();
+        let _ = delete_key(Root::Hkcu, r"Software\OPTEA\PruneStop");
+    }
+
+    #[test]
+    fn key_is_empty_distinguishes_values_from_emptiness() {
+        let key = RegKey::hkcu(r"Software\OPTEA\EmptyTest", "V");
+        write(&key, &RegValue::Dword(1)).unwrap();
+        assert!(!key_is_empty(Root::Hkcu, r"Software\OPTEA\EmptyTest").unwrap());
+
+        delete(&key).unwrap();
+        assert!(key_is_empty(Root::Hkcu, r"Software\OPTEA\EmptyTest").unwrap());
+
+        delete_key(Root::Hkcu, r"Software\OPTEA\EmptyTest").unwrap();
+        // A key that does not exist is not "empty" — it is absent.
+        assert!(!key_is_empty(Root::Hkcu, r"Software\OPTEA\EmptyTest").unwrap());
     }
 }
