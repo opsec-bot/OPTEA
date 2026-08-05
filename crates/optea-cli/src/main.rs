@@ -13,6 +13,8 @@ USAGE:
 
 COMMANDS:
     doctor              Read-only system report. Changes nothing.
+    measure check       Verify the PresentMon service and frame query work.
+    measure capture     Capture frames from a running game and summarise them.
     list                Show the tweak catalog and each entry's current state.
     apply               Apply tweaks. Captures a revertible snapshot first.
     revert [<id>]       Undo a transaction. Defaults to the most recent.
@@ -27,6 +29,8 @@ OPTIONS:
     --dry-run           Show what apply would do, without changing anything.
     --i-understand      Required opt-in for deep-risk tweaks. These can leave a
                         machine unbootable; a restore point is strongly advised.
+    --pid <n>           Process to capture. Defaults to a detected game.
+    --seconds <n>       Capture duration. Default 10.
 
 Applying or reverting requires an elevated (administrator) terminal.
 ";
@@ -38,6 +42,8 @@ struct Args {
     understand: bool,
     risk: Risk,
     only: Vec<String>,
+    pid: Option<u32>,
+    seconds: u64,
     positional: Vec<String>,
 }
 
@@ -50,6 +56,8 @@ fn parse_args() -> Result<Args> {
         understand: false,
         risk: Risk::Safe,
         only: Vec::new(),
+        pid: None,
+        seconds: 10,
         positional: Vec::new(),
     };
 
@@ -68,6 +76,18 @@ fn parse_args() -> Result<Args> {
                     "deep" => Risk::Deep,
                     other => bail!("unknown risk level '{other}' (safe | moderate | deep)"),
                 };
+            }
+            "--pid" => {
+                i += 1;
+                let v = raw.get(i).map(String::as_str).unwrap_or("");
+                args.pid = Some(v.parse().map_err(|_| anyhow::anyhow!("bad --pid '{v}'"))?);
+            }
+            "--seconds" => {
+                i += 1;
+                let v = raw.get(i).map(String::as_str).unwrap_or("");
+                args.seconds = v
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("bad --seconds '{v}'"))?;
             }
             "--only" => {
                 i += 1;
@@ -109,6 +129,7 @@ fn main() -> Result<()> {
                 render::report(&report);
             }
         }
+        "measure" => cmd_measure(&args)?,
         "list" => cmd_list(&args)?,
         "apply" => cmd_apply(&args)?,
         "revert" => cmd_revert(&args)?,
@@ -120,6 +141,86 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_measure(args: &Args) -> Result<()> {
+    match args.positional.first().map(String::as_str) {
+        Some("check") | None => {
+            let d = optea_metrics::presentmon::diagnose()?;
+            render::measure_check(&d);
+            Ok(())
+        }
+        Some("capture") => cmd_capture(args),
+        Some(other) => bail!("unknown measure subcommand '{other}' (try: check | capture)"),
+    }
+}
+
+/// Executables that actually present frames, in priority order.
+///
+/// `RainbowSix_BE.exe` is deliberately absent: it is the BattlEye launcher
+/// shim, which has no window and never presents. Tracking it yields a capture
+/// with zero frames.
+const KNOWN_GAMES: &[&str] = &["RainbowSix", "RainbowSixGame"];
+
+fn cmd_capture(args: &Args) -> Result<()> {
+    use std::time::Duration;
+
+    let pid = match args.pid {
+        Some(p) => p,
+        None => detect_game_pid()
+            .ok_or_else(|| anyhow::anyhow!("no known game running — pass --pid <n>"))?,
+    };
+
+    println!(
+        "capturing pid {pid} for {}s (passive ETW — the game is not touched)...",
+        args.seconds
+    );
+
+    let mut session = optea_metrics::presentmon::Session::open()?;
+    session.track(pid)?;
+    let frames = session.capture(
+        pid,
+        Duration::from_secs(args.seconds),
+        Duration::from_millis(200),
+    )?;
+
+    let summary = optea_metrics::summarize(&frames)
+        .ok_or_else(|| anyhow::anyhow!("captured {} frames but none usable", frames.len()))?;
+    render::summary(&summary);
+    Ok(())
+}
+
+/// Find a running game by executable name.
+///
+/// Iterates [`KNOWN_GAMES`] in priority order rather than walking the process
+/// list, so a lower-priority match cannot win merely by appearing earlier in
+/// `tasklist` output — which is how the BattlEye shim was picked over the game.
+fn detect_game_pid() -> Option<u32> {
+    let out = std::process::Command::new("tasklist")
+        .args(["/fo", "csv", "/nh"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let running: Vec<(String, u32)> = text
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split("\",\"").collect();
+            if fields.len() < 2 {
+                return None;
+            }
+            let name = fields[0].trim_start_matches('"');
+            let stem = name.strip_suffix(".exe").unwrap_or(name);
+            Some((stem.to_string(), fields[1].trim().parse().ok()?))
+        })
+        .collect();
+
+    KNOWN_GAMES.iter().find_map(|game| {
+        running
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(game))
+            .map(|(_, pid)| *pid)
+    })
 }
 
 fn cmd_list(args: &Args) -> Result<()> {

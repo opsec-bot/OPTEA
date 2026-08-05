@@ -114,6 +114,62 @@ pub fn is_installed() -> bool {
     candidate_paths().iter().any(|p| p.is_absolute() && p.is_file())
 }
 
+/// Result of end-to-end validation against the live service.
+#[derive(Debug)]
+pub struct Diagnostics {
+    pub dll_path: String,
+    pub api_version: (u16, u16, u16),
+    pub expected_api: (u16, u16),
+    pub session_opened: bool,
+    /// Blob byte size the service reports for OPTEA's frame query.
+    pub blob_size: Option<u32>,
+    /// Byte offset the service assigns each metric within a frame blob.
+    pub offsets: Vec<(&'static str, u64)>,
+}
+
+/// Load the DLL, open a session, and register OPTEA's real frame query.
+///
+/// This is the check that turns the transcribed FFI from "believed correct" into
+/// "observed working": if any struct layout or signature were wrong, registering
+/// the query would fail or report nonsense offsets.
+pub fn diagnose() -> Result<Diagnostics> {
+    let lib = Library::load()?;
+    let dll_path = lib.path().to_string();
+    let api_version = lib.api_version()?;
+
+    let mut handle: ffi::PM_SESSION_HANDLE = std::ptr::null_mut();
+    check("pmOpenSession", unsafe { (lib.open_session)(&mut handle) })?;
+
+    let query = FrameQuery::register(&lib, handle);
+    let (blob_size, offsets) = match &query {
+        Ok(q) => (
+            Some(q.blob_size),
+            vec![
+                (Metric::CpuFrameTime.symbol(), q.off_frame_time),
+                (Metric::GpuBusy.symbol(), q.off_gpu_busy),
+                (Metric::AllInputToPhotonLatency.symbol(), q.off_latency),
+            ],
+        ),
+        Err(_) => (None, Vec::new()),
+    };
+    if let Ok(mut q) = query {
+        q.free(&lib);
+    }
+
+    unsafe {
+        let _ = (lib.close_session)(handle);
+    }
+
+    Ok(Diagnostics {
+        dll_path,
+        api_version,
+        expected_api: ffi::GENERATED_AGAINST,
+        session_opened: true,
+        blob_size,
+        offsets,
+    })
+}
+
 /// Dynamically loaded PresentMonAPI2 entry points.
 pub struct Library {
     module: HMODULE,

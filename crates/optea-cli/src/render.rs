@@ -154,6 +154,125 @@ fn kv(st: &Style, key: &str, value: &str) {
     println!("  {:<22} {}", st.dim(key), value);
 }
 
+pub fn measure_check(d: &optea_metrics::presentmon::Diagnostics) {
+    let st = Style::detect();
+    let (maj, min, patch) = d.api_version;
+
+    println!();
+    println!("{}", st.bold("PRESENTMON CHECK"));
+    kv(&st, "DLL", &d.dll_path);
+    kv(&st, "API version", &format!("{maj}.{min}.{patch}"));
+    kv(
+        &st,
+        "Table verified vs",
+        &format!("{}.{}", d.expected_api.0, d.expected_api.1),
+    );
+    kv(
+        &st,
+        "Session",
+        &if d.session_opened {
+            st.paint("32", "opened")
+        } else {
+            st.paint("31", "failed")
+        },
+    );
+
+    match d.blob_size {
+        Some(size) => {
+            kv(&st, "Frame blob", &format!("{size} bytes"));
+            println!();
+            println!("  {}", st.dim("metric offsets within each frame blob:"));
+            for (symbol, offset) in &d.offsets {
+                println!("    {:<40} +{offset}", st.dim(symbol));
+            }
+            println!();
+            println!(
+                "  {}",
+                st.paint("32", "Frame query registered — the FFI works against this service.")
+            );
+        }
+        None => {
+            println!();
+            println!(
+                "  {}",
+                st.paint("31", "Frame query registration FAILED — the metric table may be stale.")
+            );
+        }
+    }
+    println!();
+}
+
+pub fn summary(s: &optea_metrics::Summary) {
+    let st = Style::detect();
+    println!();
+    println!("{}", st.bold("CAPTURE"));
+    kv(
+        &st,
+        "Frames",
+        &format!("{} over {:.1}s", s.frames, s.duration_s),
+    );
+    println!();
+    kv(&st, "Average FPS", &format!("{:.1}", s.avg_fps));
+    // The lows are what a competitive player actually feels.
+    kv(
+        &st,
+        "1% low FPS",
+        &st.bold(&format!("{:.1}", s.low_1_fps)),
+    );
+    kv(&st, "0.1% low FPS", &format!("{:.1}", s.low_01_fps));
+    println!();
+    kv(
+        &st,
+        "Frametime p50",
+        &format!("{:.2} ms", s.frame_time_p50_ms),
+    );
+    kv(
+        &st,
+        "Frametime p99",
+        &format!("{:.2} ms", s.frame_time_p99_ms),
+    );
+    match s.gpu_busy_mean_ms {
+        Some(v) => kv(&st, "GPU busy (mean)", &format!("{v:.2} ms", )),
+        None => kv(&st, "GPU busy (mean)", &st.dim("not reported")),
+    }
+    match s.input_latency_p50_ms {
+        Some(v) => kv(&st, "Input latency p50", &format!("{v:.2} ms")),
+        None => kv(
+            &st,
+            "Input latency p50",
+            &st.dim("not reported (needs a title that emits input markers)"),
+        ),
+    }
+
+    // A CPU-bound frame is one the GPU finished early and then waited on.
+    if let Some(gpu) = s.gpu_busy_mean_ms {
+        let cpu_bound = gpu < s.frame_time_p50_ms * 0.9;
+        println!();
+        if cpu_bound {
+            println!(
+                "  {}",
+                st.paint(
+                    "33",
+                    &format!(
+                        "GPU busy {:.2} ms vs {:.2} ms frametime — GPU is idle most of the frame, \
+                         so this is CPU-bound.",
+                        gpu, s.frame_time_p50_ms
+                    )
+                )
+            );
+        } else {
+            println!(
+                "  {}",
+                st.dim(&format!(
+                    "GPU busy {:.2} ms of {:.2} ms frametime — GPU-bound.",
+                    gpu, s.frame_time_p50_ms
+                ))
+            );
+        }
+    }
+    println!();
+}
+
 fn risk_tag(st: &Style, risk: Risk) -> String {
     let code = match risk {
         Risk::Safe => "32",

@@ -2,14 +2,21 @@
 //!
 //! # Provenance and risk
 //!
-//! These declarations were transcribed from the public `PresentMonAPI.h` in
-//! GameTechDev/PresentMon rather than from an installed SDK header, and have not
-//! yet been exercised against a running PresentMon service.
+//! Verified line-by-line against the installed SDK header at
+//! `C:\Program Files\Intel\PresentMon\SDK\PresentMonAPI.h` from PresentMon
+//! **2.5.1**, which declares `PM_API_VERSION 3.3`. All struct layouts and
+//! function signatures match.
 //!
 //! `PM_METRIC` is a plain C enum, so every value is positional: inserting a
 //! metric anywhere in the upstream list shifts every later ordinal. A stale
 //! table would not fail loudly — it would silently read the *wrong metric* and
 //! feed plausible-looking garbage into the statistics layer.
+//!
+//! That risk is real rather than theoretical: the `main`-branch header carries
+//! six metrics this release does not (`PSO_COMPILE_*`, `CPU_CORE_TEMPERATURE`,
+//! …), moving `PM_METRIC_COUNT_` from 91 to 95. The ordinals below survived only
+//! because Intel *appended* them past the ones OPTEA reads. An insert anywhere
+//! earlier would have silently repointed every metric here.
 //!
 //! Three defences, because a comparison harness that reports confident numbers
 //! from the wrong field is worse than no harness at all:
@@ -26,8 +33,15 @@
 
 use std::ffi::c_void;
 
-/// Upstream API version this metric table was transcribed from.
-pub const GENERATED_AGAINST: (u16, u16) = (2, 2);
+/// `PM_API_VERSION_MAJOR` / `_MINOR` this metric table was verified against.
+///
+/// Note this is the **API** version from the header, which is not the product
+/// version: PresentMon 2.5.1 ships API 3.3.
+pub const GENERATED_AGAINST: (u16, u16) = (3, 3);
+
+/// `PM_METRIC_COUNT_` in the verified header. Ordinals at or above this are
+/// invalid and indicate the table has drifted from the installed service.
+pub const METRIC_COUNT: i32 = 91;
 
 pub type PM_SESSION_HANDLE = *mut c_void;
 pub type PM_FRAME_QUERY_HANDLE = *mut c_void;
@@ -221,7 +235,6 @@ mod tests {
 
     #[test]
     fn metric_ordinals_are_in_range() {
-        // PM_METRIC_COUNT_ is 95 in the transcribed enum.
         for m in [
             Metric::CpuFrameTime,
             Metric::GpuBusy,
@@ -229,12 +242,23 @@ mod tests {
             Metric::AllInputToPhotonLatency,
         ] {
             assert!(
-                (0..95).contains(&m.ordinal()),
-                "{} ordinal {} out of range",
+                (0..METRIC_COUNT).contains(&m.ordinal()),
+                "{} ordinal {} is outside PM_METRIC_COUNT_ ({METRIC_COUNT})",
                 m.symbol(),
                 m.ordinal()
             );
         }
+    }
+
+    /// Ordinals as counted in the installed 2.5.1 header. Spelled out so a
+    /// future version bump has to consciously re-verify each one rather than
+    /// quietly inherit a stale value.
+    #[test]
+    fn metric_ordinals_match_the_verified_header() {
+        assert_eq!(Metric::CpuFrameTime.ordinal(), 8);
+        assert_eq!(Metric::GpuBusy.ordinal(), 14);
+        assert_eq!(Metric::ClickToPhotonLatency.ordinal(), 25);
+        assert_eq!(Metric::AllInputToPhotonLatency.ordinal(), 65);
     }
 
     #[test]

@@ -15,7 +15,7 @@ working correctly, not failing.
 |---|---|
 | 0 — Win32 layer + `doctor` | done |
 | 1 — statistics | done |
-| 1 — PresentMon capture | written, **not yet validated against a live service** |
+| 1 — PresentMon capture | done, validated against a live service |
 | 2 — transactional apply/revert | done |
 | 3 — tweak catalog | initial set |
 | 4 — Siege `GameSettings.ini` | not started |
@@ -81,10 +81,17 @@ Rust 1.82+, MSVC toolchain, Windows 10/11.
 ## Measurement
 
 Frame capture wraps Intel [PresentMon](https://github.com/GameTechDev/PresentMon)
-(service + SDK required; `doctor` reports whether it is present). The FFI in
-`crates/optea-metrics/src/ffi.rs` was transcribed from the public header and has
-**not yet been exercised against a running service**. `PM_METRIC` is a positional
-C enum, so a stale table would read the wrong field rather than fail loudly.
-Three guards are in place: an API version check at session open, a single
-name-keyed ordinal table, and a plausibility range on captured frame times that
-rejects a capture whose values could not be real frames.
+(service + SDK required; `doctor` reports whether it is present). Verified
+against **2.5.1 / API 3.3**: `optea measure check` opens a session and registers
+the real frame query, and `optea measure capture` returns live frames.
+
+`PM_METRIC` is a positional C enum, so a stale table would read the wrong field
+rather than fail loudly. Three guards: an API version check at session open, a
+single name-keyed ordinal table, and a plausibility range on captured frame times
+that rejects a capture whose values could not be real frames. The risk is not
+hypothetical — the `main`-branch header already carries six metrics 2.5.1 does
+not, and the ordinals here held only because those were appended past them.
+
+Capture is passive: PresentMon consumes ETW traces the OS already emits, so
+tracking a process is a PID filter on that stream — no handle into the game, no
+memory access. This is what keeps measurement inside the anti-cheat boundary.
