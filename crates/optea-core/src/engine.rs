@@ -355,6 +355,11 @@ fn timestamp_id() -> String {
     )
 }
 
+/// Shared with [`crate::bench`], which needs the same id format.
+pub(crate) fn civil_from_days_pub(z: i64) -> (i64, u32, u32) {
+    civil_from_days(z)
+}
+
 /// Howard Hinnant's `civil_from_days`, for days since the Unix epoch.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;

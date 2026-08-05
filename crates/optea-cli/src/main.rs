@@ -19,6 +19,9 @@ COMMANDS:
     siege settings      Read GameSettings.ini and analyse it for this hardware.
     siege backup        Take a verified backup now. Safe while the game runs.
     siege restore       Restore the settings file from a backup.
+    bench record        Capture a run and store it under a label.
+    bench list          Show recorded labels and run counts.
+    bench compare       A/B two labels and report whether the difference is real.
     list                Show the tweak catalog and each entry's current state.
     apply               Apply tweaks. Captures a revertible snapshot first.
     revert [<id>]       Undo a transaction. Defaults to the most recent.
@@ -35,6 +38,9 @@ OPTIONS:
                         machine unbootable; a restore point is strongly advised.
     --pid <n>           Process to capture. Defaults to a detected game.
     --seconds <n>       Capture duration. Default 10.
+    --label <name>      Label to record a benchmark run under.
+    --note <text>       Note stored with a run (map, scene, settings).
+    --confidence <p>    Confidence level for comparisons. Default 0.95.
 
 Applying or reverting requires an elevated (administrator) terminal.
 ";
@@ -48,6 +54,9 @@ struct Args {
     only: Vec<String>,
     pid: Option<u32>,
     seconds: u64,
+    label: Option<String>,
+    note: String,
+    confidence: f64,
     positional: Vec<String>,
 }
 
@@ -62,6 +71,9 @@ fn parse_args() -> Result<Args> {
         only: Vec::new(),
         pid: None,
         seconds: 10,
+        label: None,
+        note: String::new(),
+        confidence: 0.95,
         positional: Vec::new(),
     };
 
@@ -92,6 +104,24 @@ fn parse_args() -> Result<Args> {
                 args.seconds = v
                     .parse()
                     .map_err(|_| anyhow::anyhow!("bad --seconds '{v}'"))?;
+            }
+            "--label" => {
+                i += 1;
+                args.label = raw.get(i).cloned();
+            }
+            "--note" => {
+                i += 1;
+                args.note = raw.get(i).cloned().unwrap_or_default();
+            }
+            "--confidence" => {
+                i += 1;
+                let v = raw.get(i).map(String::as_str).unwrap_or("");
+                args.confidence = v
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("bad --confidence '{v}'"))?;
+                if !(0.5..1.0).contains(&args.confidence) {
+                    bail!("--confidence must be between 0.5 and 1.0");
+                }
             }
             "--only" => {
                 i += 1;
@@ -135,6 +165,7 @@ fn main() -> Result<()> {
         }
         "measure" => cmd_measure(&args)?,
         "siege" => cmd_siege(&args)?,
+        "bench" => cmd_bench(&args)?,
         "list" => cmd_list(&args)?,
         "apply" => cmd_apply(&args)?,
         "revert" => cmd_revert(&args)?,
@@ -157,6 +188,82 @@ fn cmd_measure(args: &Args) -> Result<()> {
         }
         Some("capture") => cmd_capture(args),
         Some(other) => bail!("unknown measure subcommand '{other}' (try: check | capture)"),
+    }
+}
+
+/// Fixed so a verdict is reproducible across invocations. Change it only to
+/// check deliberately that a result is not an artefact of one resampling.
+const BOOTSTRAP_SEED: u64 = 0x0071_EA00;
+
+fn cmd_bench(args: &Args) -> Result<()> {
+    use std::time::Duration;
+    let store = optea_core::bench::BenchStore::with_default_dir()?;
+
+    match args.positional.first().map(String::as_str) {
+        Some("list") | None => {
+            render::bench_list(&store);
+            Ok(())
+        }
+        Some("record") => {
+            let label = args
+                .label
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--label is required (e.g. --label baseline)"))?;
+            let pid = match args.pid {
+                Some(p) => p,
+                None => detect_game_pid()
+                    .ok_or_else(|| anyhow::anyhow!("no known game running — pass --pid <n>"))?,
+            };
+
+            println!("capturing pid {pid} for {}s...", args.seconds);
+            let mut session = optea_metrics::presentmon::Session::open()?;
+            session.track(pid)?;
+            let capture = session.capture(
+                pid,
+                Duration::from_secs(args.seconds),
+                Duration::from_millis(200),
+            )?;
+
+            // Record which tweaks are active, so a run's provenance is stored
+            // with it rather than relying on memory.
+            let sys = SystemInfo::query()?;
+            let active: Vec<String> = optea_core::catalog::all(&sys)
+                .iter()
+                .filter(|t| t.applicable(&sys) == optea_core::Applicability::AlreadySet)
+                .map(|t| t.id().to_string())
+                .collect();
+
+            let run = store.record(
+                &label,
+                &capture.frames,
+                active,
+                &args.note,
+                capture.focus.focused_fraction(),
+            )?;
+            render::bench_recorded(&run, &store, &capture);
+            Ok(())
+        }
+        Some("compare") => {
+            let baseline = args
+                .positional
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("usage: optea bench compare <baseline> <variant>"))?;
+            let variant = args
+                .positional
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("usage: optea bench compare <baseline> <variant>"))?;
+
+            // Seed is fixed so a verdict is reproducible; vary it deliberately
+            // only to check a result is not an artefact of one resampling.
+            let cmp = store.compare(baseline, variant, args.confidence, BOOTSTRAP_SEED)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&cmp)?);
+            } else {
+                render::bench_comparison(&cmp);
+            }
+            Ok(())
+        }
+        Some(other) => bail!("unknown bench subcommand '{other}' (record | list | compare)"),
     }
 }
 
@@ -273,15 +380,19 @@ fn cmd_capture(args: &Args) -> Result<()> {
 
     let mut session = optea_metrics::presentmon::Session::open()?;
     session.track(pid)?;
-    let frames = session.capture(
+    let capture = session.capture(
         pid,
         Duration::from_secs(args.seconds),
         Duration::from_millis(200),
     )?;
 
-    let summary = optea_metrics::summarize(&frames)
-        .ok_or_else(|| anyhow::anyhow!("captured {} frames but none usable", frames.len()))?;
-    render::summary(&summary);
+    let summary = optea_metrics::summarize(&capture.frames).ok_or_else(|| {
+        anyhow::anyhow!(
+            "captured {} frames but none usable",
+            capture.frames.len()
+        )
+    })?;
+    render::summary(&summary, &capture);
     Ok(())
 }
 

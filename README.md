@@ -18,8 +18,8 @@ working correctly, not failing.
 | 1 — PresentMon capture | done, validated against a live service |
 | 2 — transactional apply/revert | done |
 | 3 — tweak catalog | initial set |
-| 4 — Siege `GameSettings.ini` | not started |
-| 5 — A/B benchmark automation | not started |
+| 4 — Siege `GameSettings.ini` | read + analyse done; writes pending |
+| 5 — A/B benchmark automation | done |
 | 6 — GUI | not started |
 | 7 — live process tuning | not started |
 
@@ -32,6 +32,18 @@ optea apply --dry-run     # what would change
 optea apply               # apply safe tweaks (snapshot captured first)
 optea revert              # undo the most recent transaction
 optea history             # recorded transactions
+
+optea measure check       # verify the PresentMon service and frame query
+optea measure capture     # summarise live frames from the running game
+
+optea siege status        # profile, settings file, backup state
+optea siege settings      # read GameSettings.ini and analyse it
+optea siege backup        # verified backup; safe even mid-match
+optea siege restore       # restore from pristine or a specific backup
+
+optea bench record --label baseline
+optea bench list
+optea bench compare baseline variant
 ```
 
 Add `--json` to `doctor`, `list`, and `history` for machine-readable output.
@@ -61,7 +73,15 @@ report-only with the reason stated, never as a toggle that silently does nothing
 
 **Evidence is earned.** Everything ships as `unverified`. Only the benchmark
 harness promotes an entry, using paired trials and a bootstrap confidence
-interval that is allowed to conclude nothing happened.
+interval that is allowed to conclude nothing happened. A comparison is refused
+outright on a single run per side, since one run carries no information about
+variance.
+
+**A capture must prove it is trustworthy.** Games throttle rendering when they
+lose focus — Siege drops to roughly 30 FPS — so a background capture yields
+numbers that look entirely plausible while describing the throttle rather than
+the game. Focus is sampled throughout every capture and stored with the run, and
+any comparison containing an unfocused run is refused rather than reported.
 
 **The anti-cheat boundary is hard.** Siege runs BattlEye. OPTEA never reads or
 writes game memory, injects, hooks, or attaches a debugger. System-wide settings

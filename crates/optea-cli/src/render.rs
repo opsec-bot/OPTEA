@@ -154,6 +154,175 @@ fn kv(st: &Style, key: &str, value: &str) {
     println!("  {:<22} {}", st.dim(key), value);
 }
 
+pub fn bench_list(store: &optea_core::bench::BenchStore) {
+    use optea_core::bench::{MIN_RUNS, RECOMMENDED_RUNS};
+    let st = Style::detect();
+    let labels = store.labels();
+
+    println!();
+    println!("{}", st.bold("RECORDED BENCHMARKS"));
+    kv(&st, "Store", &store.dir().display().to_string());
+    println!();
+
+    if labels.is_empty() {
+        println!("  {}", st.dim("nothing recorded yet"));
+        println!(
+            "  {}",
+            st.dim("start with: optea bench record --label baseline")
+        );
+        println!();
+        return;
+    }
+
+    for (label, count) in &labels {
+        let note = if *count < MIN_RUNS {
+            st.paint("31", "too few to compare")
+        } else if *count < RECOMMENDED_RUNS {
+            st.paint("33", "enough to compare, but only a large effect would show")
+        } else {
+            st.paint("32", "ready")
+        };
+        println!("  {:<28} {:>2} run(s)  {}", st.bold(label), count, note);
+    }
+
+    println!();
+    println!(
+        "  {}",
+        st.dim(&format!(
+            "{RECOMMENDED_RUNS} runs per label is the point where small effects become resolvable."
+        ))
+    );
+    println!();
+}
+
+pub fn bench_recorded(
+    run: &optea_core::bench::Run,
+    store: &optea_core::bench::BenchStore,
+    capture: &optea_metrics::presentmon::Capture,
+) {
+    use optea_core::bench::{MIN_RUNS, RECOMMENDED_RUNS};
+    let st = Style::detect();
+    let s = &run.summary;
+    let count = store.runs_for(&run.label).len();
+
+    println!();
+    println!(
+        "{} {}",
+        st.bold("RECORDED"),
+        st.dim(&format!("as '{}' ({} frames)", run.label, s.frames))
+    );
+    kv(&st, "Average FPS", &format!("{:.1}", s.avg_fps));
+    kv(&st, "1% low FPS", &st.bold(&format!("{:.1}", s.low_1_fps)));
+    kv(&st, "Frametime p99", &format!("{:.2} ms", s.frame_time_p99_ms));
+    kv(
+        &st,
+        "Game focused",
+        &format!("{:.0}%", run.focused_fraction * 100.0),
+    );
+    focus_warning(&st, capture);
+    println!();
+
+    if count < MIN_RUNS {
+        println!(
+            "  {} {} run under '{}'. At least {MIN_RUNS} are needed before any comparison.",
+            st.paint("33", "→"),
+            count,
+            run.label
+        );
+    } else if count < RECOMMENDED_RUNS {
+        println!(
+            "  {} {} runs under '{}'. Comparable now, but {RECOMMENDED_RUNS} is where small \
+             effects become resolvable.",
+            st.paint("33", "→"),
+            count,
+            run.label
+        );
+    } else {
+        println!(
+            "  {} {} runs under '{}' — ready to compare.",
+            st.paint("32", "→"),
+            count,
+            run.label
+        );
+    }
+    println!();
+}
+
+pub fn bench_comparison(cmp: &optea_core::bench::Comparison) {
+    use optea_metrics::stats::Verdict;
+    let st = Style::detect();
+
+    println!();
+    println!(
+        "{} {} {} {}",
+        st.bold("COMPARISON"),
+        st.dim(&cmp.baseline_label),
+        st.dim("→"),
+        st.bold(&cmp.variant_label)
+    );
+    kv(
+        &st,
+        "Runs",
+        &format!(
+            "{} baseline vs {} variant, {:.0}% confidence",
+            cmp.baseline_runs,
+            cmp.variant_runs,
+            cmp.confidence * 100.0
+        ),
+    );
+    println!();
+
+    for e in &cmp.effects {
+        let (code, tag) = match e.verdict {
+            Verdict::Improvement => ("32", "BETTER"),
+            Verdict::Regression => ("31", " WORSE"),
+            Verdict::NoDetectableEffect => ("2", "  NONE"),
+        };
+        println!(
+            "  {}  {:<22} {:>8.2} → {:>8.2}   {:+6.1}%   CI [{:+.2}, {:+.2}]",
+            st.paint(code, tag),
+            e.metric.label(),
+            e.baseline_median,
+            e.variant_median,
+            e.delta_pct,
+            e.ci_low,
+            e.ci_high
+        );
+    }
+
+    println!();
+    println!("  {}", st.bold(&cmp.conclusion()));
+
+    if !cmp.untrustworthy.is_empty() {
+        println!();
+        println!(
+            "  {}",
+            st.paint("31", "⚠ Runs captured while the game was not focused:")
+        );
+        for r in &cmp.untrustworthy {
+            println!("      {}", st.dim(r));
+        }
+    }
+    if cmp.underpowered {
+        println!();
+        println!(
+            "  {}",
+            st.paint(
+                "33",
+                "Few runs per side: only a large effect could be resolved here. A 'NONE' verdict \
+                 means 'not proven', not 'proven absent'.",
+            )
+        );
+    }
+    if cmp.all_inconclusive() {
+        println!(
+            "  {}",
+            st.dim("This is the expected outcome for most tweaks, and is a real result.")
+        );
+    }
+    println!();
+}
+
 pub fn siege_settings(
     s: &optea_game::settings::GraphicsSettings,
     findings: &[optea_game::settings::SettingFinding],
@@ -375,7 +544,24 @@ pub fn measure_check(d: &optea_metrics::presentmon::Diagnostics) {
     println!();
 }
 
-pub fn summary(s: &optea_metrics::Summary) {
+/// Warn prominently when a capture was taken with the game in the background.
+fn focus_warning(st: &Style, capture: &optea_metrics::presentmon::Capture) {
+    if capture.is_trustworthy() {
+        return;
+    }
+    println!();
+    println!(
+        "  {}",
+        st.paint("31", "⚠ THESE NUMBERS ARE NOT USABLE")
+    );
+    println!("  {}", st.paint("33", &capture.focus_note()));
+    println!(
+        "  {}",
+        st.dim("Focus the game window and capture again.")
+    );
+}
+
+pub fn summary(s: &optea_metrics::Summary, capture: &optea_metrics::presentmon::Capture) {
     let st = Style::detect();
     println!();
     println!("{}", st.bold("CAPTURE"));
@@ -384,6 +570,12 @@ pub fn summary(s: &optea_metrics::Summary) {
         "Frames",
         &format!("{} over {:.1}s", s.frames, s.duration_s),
     );
+    kv(
+        &st,
+        "Game focused",
+        &format!("{:.0}%", capture.focus.focused_fraction() * 100.0),
+    );
+    focus_warning(&st, capture);
     println!();
     kv(&st, "Average FPS", &format!("{:.1}", s.avg_fps));
     // The lows are what a competitive player actually feels.

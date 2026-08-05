@@ -165,6 +165,7 @@ dependencies = [
 name = "optea-metrics"
 version = "0.1.0"
 dependencies = [
+ "optea-sys",
  "serde",
  "serde_json",
  "thiserror",

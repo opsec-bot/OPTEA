@@ -10,6 +10,7 @@
 
 use crate::ffi::{self, Metric, PM_QUERY_ELEMENT, PM_STATUS, PM_VERSION};
 use crate::stats::FrameSample;
+use optea_sys::foreground::FocusMonitor;
 use std::ffi::CString;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -112,6 +113,27 @@ fn candidate_paths() -> Vec<PathBuf> {
 /// measurement availability without attempting a capture.
 pub fn is_installed() -> bool {
     candidate_paths().iter().any(|p| p.is_absolute() && p.is_file())
+}
+
+/// Captured frames plus the focus record for the capture window.
+///
+/// The two travel together on purpose: a caller cannot obtain frames without
+/// also receiving the evidence of whether they are trustworthy.
+pub struct Capture {
+    pub frames: Vec<FrameSample>,
+    pub focus: FocusMonitor,
+}
+
+impl Capture {
+    /// True when the game held focus throughout, so the numbers describe the
+    /// game rather than a background throttle.
+    pub fn is_trustworthy(&self) -> bool {
+        self.focus.was_focused_throughout()
+    }
+
+    pub fn focus_note(&self) -> String {
+        self.focus.describe()
+    }
 }
 
 /// Result of end-to-end validation against the live service.
@@ -304,23 +326,26 @@ impl Session {
     }
 
     /// Capture frames for `duration`, polling at `poll` intervals.
+    ///
+    /// Focus is sampled throughout, because a backgrounded game is usually
+    /// throttled and would otherwise yield plausible-looking nonsense.
     pub fn capture(
         &mut self,
         pid: u32,
         duration: Duration,
         poll: Duration,
-    ) -> Result<Vec<FrameSample>> {
+    ) -> Result<Capture> {
         let mut query = FrameQuery::register(&self.lib, self.handle)?;
         let result = self.capture_loop(&mut query, pid, duration, poll);
         // Free the query even when the capture failed part-way through.
         query.free(&self.lib);
-        let frames = result?;
+        let (frames, focus) = result?;
 
         if frames.is_empty() {
             return Err(CaptureError::NoFrames { pid });
         }
         validate(&frames)?;
-        Ok(frames)
+        Ok(Capture { frames, focus })
     }
 
     fn capture_loop(
@@ -329,16 +354,20 @@ impl Session {
         pid: u32,
         duration: Duration,
         poll: Duration,
-    ) -> Result<Vec<FrameSample>> {
+    ) -> Result<(Vec<FrameSample>, FocusMonitor)> {
         let mut frames = Vec::new();
+        let mut focus = FocusMonitor::new(pid);
         let deadline = Instant::now() + duration;
+
         while Instant::now() < deadline {
+            focus.sample();
             frames.extend(query.consume(&self.lib, pid)?);
             std::thread::sleep(poll);
         }
+        focus.sample();
         // Final drain, so frames presented in the last poll window are not lost.
         frames.extend(query.consume(&self.lib, pid)?);
-        Ok(frames)
+        Ok((frames, focus))
     }
 }
 

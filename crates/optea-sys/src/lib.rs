@@ -8,6 +8,7 @@
 
 pub mod display;
 pub mod error;
+pub mod foreground;
 pub mod gpu;
 pub mod paths;
 pub mod power;

@@ -1,5 +1,6 @@
 //! Tweak model, catalog, snapshot/revert engine, and profiles.
 
+pub mod bench;
 pub mod catalog;
 pub mod doctor;
 pub mod engine;
