@@ -1,0 +1,20 @@
+[package]
+name = "optea-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_UI_Shell",
+    "Win32_Globalization",
+]
+
+[target.'cfg(windows)'.dependencies]

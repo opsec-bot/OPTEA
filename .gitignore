@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Local benchmark captures and snapshots
+/captures
+/snapshots
+*.etl
