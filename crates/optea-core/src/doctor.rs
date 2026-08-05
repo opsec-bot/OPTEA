@@ -299,8 +299,11 @@ fn check_cpu_headroom(cpu: &CpuInfo, displays: &[DisplayInfo], out: &mut Vec<Fin
     }
 
     let primary = displays.iter().find(|d| d.is_primary).or(displays.first());
+    // Deliberately phrased as the *display* mode. The game may well render at a
+    // lower resolution than the desktop, so implying the two are the same would
+    // misstate the workload — `optea siege settings` reports the render side.
     let mode = primary
-        .map(|d| format!(" at {}", d.mode_string()))
+        .map(|d| format!(" The display runs at {}.", d.mode_string()))
         .unwrap_or_default();
 
     out.push(
@@ -309,13 +312,14 @@ fn check_cpu_headroom(cpu: &CpuInfo, displays: &[DisplayInfo], out: &mut Vec<Fin
             "CPU is the likely frame-rate limit",
             format!(
                 "{} has {} physical cores / {} threads. Siege is CPU-bound even on modern \
-                 high-core-count parts{mode}.",
+                 high-core-count parts.{mode}",
                 cpu.name, cpu.physical_cores, cpu.logical_processors
             ),
         )
         .with_advice(
-            "System tweaks realistically move 1% lows by single-digit percent here. Render \
-             scale and output resolution are far larger levers — benchmark those first.",
+            "System tweaks realistically move 1% lows by single-digit percent here. Run \
+             `optea siege settings` — render resolution and CPU-side quality settings are far \
+             larger levers.",
         ),
     );
 }

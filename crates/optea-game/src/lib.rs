@@ -1,7 +1,9 @@
 //! Rainbow Six Siege specifics: GameSettings.ini, profile discovery, launch chain.
 
 pub mod backup;
+pub mod ini;
 pub mod profile;
+pub mod settings;
 
 pub use backup::{Backup, BackupStore, GuardedFile};
 

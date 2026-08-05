@@ -16,6 +16,7 @@ COMMANDS:
     measure check       Verify the PresentMon service and frame query work.
     measure capture     Capture frames from a running game and summarise them.
     siege status        Show the Siege profile, settings file, and backup state.
+    siege settings      Read GameSettings.ini and analyse it for this hardware.
     siege backup        Take a verified backup now. Safe while the game runs.
     siege restore       Restore the settings file from a backup.
     list                Show the tweak catalog and each entry's current state.
@@ -177,6 +178,36 @@ fn cmd_siege(args: &Args) -> Result<()> {
         Some("status") | None => {
             let (profile, file) = siege_file()?;
             render::siege_status(&profile, &file);
+            Ok(())
+        }
+        Some("settings") => {
+            let (_, file) = siege_file()?;
+            let doc = optea_game::ini::IniDocument::parse(&file.read()?);
+            let settings = optea_game::settings::GraphicsSettings::from_document(&doc);
+
+            // Resolve the display the game most likely runs on: the primary.
+            let displays = optea_sys::display::enumerate().unwrap_or_default();
+            let primary = displays.iter().find(|d| d.is_primary).or(displays.first());
+            let cpu = optea_sys::CpuInfo::query()?;
+            let ctx = optea_game::settings::MachineContext {
+                physical_cores: cpu.physical_cores,
+                display_width: primary.map(|d| d.width as i64),
+                display_height: primary.map(|d| d.height as i64),
+                display_refresh_hz: primary.map(|d| d.refresh_hz),
+            };
+
+            let findings = optea_game::settings::analyze(&settings, &ctx);
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "settings": settings,
+                        "findings": findings,
+                    }))?
+                );
+            } else {
+                render::siege_settings(&settings, &findings, &ctx);
+            }
             Ok(())
         }
         Some("backup") => {

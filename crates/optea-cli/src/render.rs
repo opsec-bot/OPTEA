@@ -154,6 +154,106 @@ fn kv(st: &Style, key: &str, value: &str) {
     println!("  {:<22} {}", st.dim(key), value);
 }
 
+pub fn siege_settings(
+    s: &optea_game::settings::GraphicsSettings,
+    findings: &[optea_game::settings::SettingFinding],
+    ctx: &optea_game::settings::MachineContext,
+) {
+    use optea_game::settings::Impact;
+    let st = Style::detect();
+
+    println!();
+    println!("{}", st.bold("GAME SETTINGS"));
+    kv(&st, "Render resolution", &s.resolution_label());
+    if let (Some(w), Some(h)) = (ctx.display_width, ctx.display_height) {
+        kv(
+            &st,
+            "Display",
+            &format!(
+                "{w}x{h}{}",
+                ctx.display_refresh_hz
+                    .map(|r| format!(" @ {r:.0} Hz"))
+                    .unwrap_or_default()
+            ),
+        );
+    }
+    if let Some(m) = s.window_mode {
+        kv(&st, "Window mode", &m.label());
+    }
+    if let Some(r) = s.reflex {
+        kv(&st, "NVIDIA Reflex", &r.label());
+    }
+    if let Some(v) = s.vsync {
+        kv(&st, "VSync", if v == 0 { "off" } else { "on" });
+    }
+    if let Some(b) = s.max_gpu_buffered_frame {
+        kv(&st, "Buffered frames", &b.to_string());
+    }
+    if let Some(f) = s.fps_limit {
+        kv(
+            &st,
+            "FPS limit",
+            &if f == 0 { "uncapped".into() } else { f.to_string() },
+        );
+    }
+    if let Some(f) = s.fov {
+        kv(&st, "FOV", &format!("{f:.0}"));
+    }
+    if let Some(p) = &s.quality_preset {
+        kv(&st, "Quality preset", p);
+    }
+
+    if !s.quality.is_empty() {
+        println!();
+        println!("{}", st.bold("QUALITY"));
+        let pairs: Vec<String> = s
+            .quality
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        for chunk in pairs.chunks(4) {
+            println!("  {}", st.dim(&chunk.join("   ")));
+        }
+    }
+
+    println!();
+    println!("{}", st.bold("ANALYSIS"));
+    for f in findings {
+        let (code, tag) = match f.impact {
+            Impact::Good => ("32", "  OK"),
+            Impact::Info => ("36", "INFO"),
+            Impact::Opportunity => ("33", "TEST"),
+        };
+        println!(
+            "  {}  {} {}",
+            st.paint(code, tag),
+            st.bold(&f.setting),
+            st.dim(&format!("= {}", f.current))
+        );
+        println!("        {}", f.detail);
+        if let Some(sug) = &f.suggestion {
+            println!("        {}", st.dim(&format!("→ {sug}")));
+        }
+    }
+
+    let count = |i: Impact| findings.iter().filter(|f| f.impact == i).count();
+    println!();
+    println!(
+        "{}",
+        st.dim(&format!(
+            "{} worth benchmarking, {} informational, {} already good",
+            count(Impact::Opportunity),
+            count(Impact::Info),
+            count(Impact::Good),
+        ))
+    );
+    println!(
+        "{}",
+        st.dim("Nothing here is applied automatically, and no gain is claimed until measured.")
+    );
+    println!();
+}
+
 pub fn siege_status(
     profile: &optea_game::profile::SiegeProfile,
     file: &optea_game::GuardedFile,
