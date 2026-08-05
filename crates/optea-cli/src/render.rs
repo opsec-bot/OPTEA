@@ -323,6 +323,79 @@ pub fn bench_comparison(cmp: &optea_core::bench::Comparison) {
     println!();
 }
 
+pub fn siege_editable() {
+    let st = Style::detect();
+    println!();
+    println!("{}", st.bold("EDITABLE SETTINGS"));
+    println!(
+        "  {}",
+        st.dim("An allowlist. Values outside these ranges are refused rather than written.")
+    );
+    println!();
+    for s in optea_game::settings::EDITABLE {
+        println!(
+            "  {:<16} {}",
+            st.bold(s.alias),
+            st.dim(&format!("[{}] {}", s.section, s.key))
+        );
+        println!("    {}", s.description);
+        println!("    {}", st.dim(&format!("allowed: {}", s.allowed.describe())));
+        println!();
+    }
+    println!(
+        "  {}",
+        st.dim("usage: optea siege set <name> <value>   (add --dry-run to preview)")
+    );
+    println!();
+}
+
+pub fn siege_set(
+    setting: &optea_game::settings::EditableSetting,
+    before: &str,
+    after: i64,
+    report: &optea_game::backup::EditReport,
+) {
+    let st = Style::detect();
+    println!();
+    if !report.changed {
+        println!(
+            "  {} [{}] {} is already {after} — nothing written",
+            st.dim("-"),
+            setting.section,
+            setting.key
+        );
+        println!();
+        return;
+    }
+
+    println!(
+        "  {} [{}] {}  {} {}",
+        st.paint("32", "✓"),
+        setting.section,
+        st.bold(setting.key),
+        st.dim(&format!("{before} →")),
+        st.bold(&after.to_string())
+    );
+    println!();
+    kv(
+        &st,
+        "Backup",
+        &format!("{} ({})", report.backup_id, report.backup_path.display()),
+    );
+    kv(&st, "Pristine", &report.pristine_path.display().to_string());
+    kv(
+        &st,
+        "Size",
+        &format!("{} → {} bytes", report.bytes_before, report.bytes_after),
+    );
+    println!();
+    println!(
+        "  {}",
+        st.dim("undo this file entirely with: optea siege restore pristine")
+    );
+    println!();
+}
+
 pub fn siege_settings(
     s: &optea_game::settings::GraphicsSettings,
     findings: &[optea_game::settings::SettingFinding],

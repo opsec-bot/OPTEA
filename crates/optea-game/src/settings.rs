@@ -155,6 +155,125 @@ impl GraphicsSettings {
     }
 }
 
+/// A setting OPTEA is willing to write, with its permitted values.
+///
+/// Deliberately a short allowlist rather than raw key access. Writing an
+/// out-of-range value into a settings file the game parses on startup is a good
+/// way to produce a crash or a silent reset, and a typo in a key name would
+/// write nothing at all while appearing to succeed.
+pub struct EditableSetting {
+    pub section: &'static str,
+    pub key: &'static str,
+    /// Short name used on the command line.
+    pub alias: &'static str,
+    pub description: &'static str,
+    pub allowed: Allowed,
+}
+
+pub enum Allowed {
+    /// Discrete values, each with an explanation.
+    Enum(&'static [(i64, &'static str)]),
+    /// Inclusive integer range.
+    Range(i64, i64),
+}
+
+impl Allowed {
+    pub fn permits(&self, v: i64) -> bool {
+        match self {
+            Allowed::Enum(opts) => opts.iter().any(|(k, _)| *k == v),
+            Allowed::Range(lo, hi) => (*lo..=*hi).contains(&v),
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Allowed::Enum(opts) => opts
+                .iter()
+                .map(|(k, label)| format!("{k} = {label}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            Allowed::Range(lo, hi) => format!("{lo}..{hi}"),
+        }
+    }
+}
+
+/// The settings worth A/B testing on this class of hardware.
+pub const EDITABLE: &[EditableSetting] = &[
+    EditableSetting {
+        section: S_DISPLAY_SETTINGS,
+        key: "WindowMode",
+        alias: "windowmode",
+        description: "Presentation mode. Exclusive fullscreen bypasses the desktop compositor.",
+        allowed: Allowed::Enum(&[
+            (0, "exclusive fullscreen"),
+            (1, "windowed"),
+            (2, "borderless"),
+        ]),
+    },
+    EditableSetting {
+        section: S_DISPLAY_SETTINGS,
+        key: "MaxGPUBufferedFrame",
+        alias: "bufferedframes",
+        description: "Frames queued ahead of the GPU. Fewer means less input-to-photon age.",
+        allowed: Allowed::Range(0, 3),
+    },
+    EditableSetting {
+        section: S_DISPLAY_SETTINGS,
+        key: "VSync",
+        alias: "vsync",
+        description: "Wait for display refresh before presenting.",
+        allowed: Allowed::Enum(&[(0, "off"), (1, "one frame"), (2, "two frames")]),
+    },
+    EditableSetting {
+        section: S_DISPLAY,
+        key: "NVReflex",
+        alias: "reflex",
+        description: "NVIDIA Reflex low-latency mode.",
+        allowed: Allowed::Enum(&[(0, "off"), (1, "on"), (2, "on + boost")]),
+    },
+    EditableSetting {
+        section: S_CUSTOM_QUALITY,
+        key: "Geometry",
+        alias: "geometry",
+        description: "Level-of-detail and draw-call volume. Mostly CPU-side work.",
+        allowed: Allowed::Range(0, 4),
+    },
+    EditableSetting {
+        section: S_CUSTOM_QUALITY,
+        key: "DOF",
+        alias: "dof",
+        description: "Depth of field. Costs GPU time and blurs distant detail.",
+        allowed: Allowed::Enum(&[(0, "off"), (1, "on")]),
+    },
+    EditableSetting {
+        section: S_CUSTOM_QUALITY,
+        key: "Shadow",
+        alias: "shadow",
+        description: "Shadow quality. GPU-side.",
+        allowed: Allowed::Range(0, 4),
+    },
+    EditableSetting {
+        section: S_CUSTOM_QUALITY,
+        key: "Texture",
+        alias: "texture",
+        description: "Texture quality. Mostly a VRAM cost.",
+        allowed: Allowed::Range(0, 4),
+    },
+    EditableSetting {
+        section: S_DISPLAY,
+        key: "FPSLimit",
+        alias: "fpslimit",
+        description: "Frame cap. 0 disables; the game ignores values under 30.",
+        allowed: Allowed::Range(0, 1000),
+    },
+];
+
+pub fn find_editable(name: &str) -> Option<&'static EditableSetting> {
+    EDITABLE
+        .iter()
+        .find(|s| s.alias.eq_ignore_ascii_case(name) || s.key.eq_ignore_ascii_case(name))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Impact {
     /// Already in the best-known state.
@@ -678,6 +797,62 @@ RenderScalingFactor=15\r\n\
                 );
             }
         }
+    }
+
+    #[test]
+    fn editable_aliases_are_unique_and_resolvable() {
+        let mut aliases: Vec<&str> = EDITABLE.iter().map(|s| s.alias).collect();
+        let n = aliases.len();
+        aliases.sort_unstable();
+        aliases.dedup();
+        assert_eq!(aliases.len(), n, "duplicate alias in EDITABLE");
+
+        for s in EDITABLE {
+            assert!(find_editable(s.alias).is_some());
+            // The real key name resolves too, case-insensitively.
+            assert!(find_editable(&s.key.to_uppercase()).is_some(), "{}", s.key);
+        }
+        assert!(find_editable("definitely-not-a-setting").is_none());
+    }
+
+    #[test]
+    fn allowed_values_are_enforced() {
+        let wm = find_editable("windowmode").unwrap();
+        assert!(wm.allowed.permits(0));
+        assert!(wm.allowed.permits(2));
+        assert!(!wm.allowed.permits(3), "3 is not a valid WindowMode");
+        assert!(!wm.allowed.permits(-1));
+
+        let buf = find_editable("bufferedframes").unwrap();
+        assert!(buf.allowed.permits(0));
+        assert!(buf.allowed.permits(3));
+        assert!(!buf.allowed.permits(4));
+    }
+
+    #[test]
+    fn every_editable_setting_exists_in_the_real_file_shape() {
+        // Guards against a typo in a key name, which would write nothing while
+        // appearing to succeed.
+        let doc = IniDocument::parse(REAL);
+        for s in EDITABLE {
+            // REAL is a trimmed excerpt, so only assert for sections it carries.
+            if doc.sections().iter().any(|x| x.eq_ignore_ascii_case(s.section)) {
+                assert!(
+                    doc.contains(s.section, s.key),
+                    "{}::{} not found in the real file",
+                    s.section,
+                    s.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn allowed_descriptions_are_human_readable() {
+        let wm = find_editable("windowmode").unwrap();
+        assert!(wm.allowed.describe().contains("exclusive fullscreen"));
+        let buf = find_editable("bufferedframes").unwrap();
+        assert_eq!(buf.allowed.describe(), "0..3");
     }
 
     #[test]

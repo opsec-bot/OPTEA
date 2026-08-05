@@ -17,6 +17,8 @@ COMMANDS:
     measure capture     Capture frames from a running game and summarise them.
     siege status        Show the Siege profile, settings file, and backup state.
     siege settings      Read GameSettings.ini and analyse it for this hardware.
+    siege set <k> <v>   Change a setting. Backs up and verifies first.
+    siege editable      List the settings OPTEA is willing to write.
     siege backup        Take a verified backup now. Safe while the game runs.
     siege restore       Restore the settings file from a backup.
     bench record        Capture a run and store it under a label.
@@ -315,6 +317,67 @@ fn cmd_siege(args: &Args) -> Result<()> {
             } else {
                 render::siege_settings(&settings, &findings, &ctx);
             }
+            Ok(())
+        }
+        Some("editable") => {
+            render::siege_editable();
+            Ok(())
+        }
+        Some("set") => {
+            let name = args
+                .positional
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("usage: optea siege set <setting> <value>"))?;
+            let raw = args
+                .positional
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("usage: optea siege set <setting> <value>"))?;
+
+            let setting = optea_game::settings::find_editable(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "'{name}' is not a setting OPTEA will write — see `optea siege editable`"
+                )
+            })?;
+            let value: i64 = raw
+                .parse()
+                .map_err(|_| anyhow::anyhow!("'{raw}' is not an integer"))?;
+            if !setting.allowed.permits(value) {
+                bail!(
+                    "{} does not accept {value}. Allowed: {}",
+                    setting.key,
+                    setting.allowed.describe()
+                );
+            }
+
+            let (_, file) = siege_file()?;
+            let before = optea_game::ini::IniDocument::parse(&file.read()?);
+            let current = before
+                .get(setting.section, setting.key)
+                .unwrap_or("<absent>")
+                .to_string();
+
+            if args.dry_run {
+                println!(
+                    "would set [{}] {} : {current} → {value} (no change made)",
+                    setting.section, setting.key
+                );
+                return Ok(());
+            }
+
+            // Every write goes through GuardedFile, so a verified backup exists
+            // before the transform is even invoked.
+            let report = file.edit(|text| {
+                let mut doc = optea_game::ini::IniDocument::parse(text);
+                if !doc.set(setting.section, setting.key, &value.to_string()) {
+                    return Err(format!(
+                        "[{}] {} not present in this file",
+                        setting.section, setting.key
+                    ));
+                }
+                Ok(doc.to_string())
+            })?;
+
+            render::siege_set(setting, &current, value, &report);
             Ok(())
         }
         Some("backup") => {
